@@ -1,10 +1,15 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  loadExternalToolPlugins,
+  loadExternalToolPluginsFromEnvironment,
+} from '../../tools/src/plugin-loader.js'
+import { defineToolPlugin, type RedTeamToolPlugin } from '../../tools/src/plugin.js'
 import { createRedTeamToolsServer } from '../../tools/src/server.js'
 import {
   commandToolResult,
@@ -72,6 +77,79 @@ describe('local security tools MCP server', () => {
 
     await client.close()
     await server.close()
+  })
+
+  it('loads a custom extension from a directory named after the plugin', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-redteam-custom-tool-'))
+    temporaryDirectories.push(directory)
+    const pluginDirectory = join(directory, 'custom-status')
+    await mkdir(pluginDirectory)
+    await writeFile(
+      join(pluginDirectory, 'index.mjs'),
+      `export default {
+        name: 'custom-status',
+        register(server) {
+          server.registerTool(
+            'custom_status',
+            {
+              description: 'Custom extension status.',
+              annotations: { openWorldHint: false, readOnlyHint: true },
+            },
+            async () => ({
+              content: [{ type: 'text', text: '{"available":true}' }],
+              structuredContent: { available: true, tool: 'custom-status' },
+            }),
+          )
+        },
+      }`,
+    )
+
+    const plugins = await loadExternalToolPlugins([pluginDirectory])
+    const server = createRedTeamToolsServer({ plugins })
+    const client = new Client({ name: 'test-client', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await server.connect(serverTransport)
+    await client.connect(clientTransport)
+
+    const tools = await client.listTools()
+    expect(tools.tools.some((tool) => tool.name === 'custom_status')).toBe(true)
+    const result = await client.callTool({ name: 'custom_status', arguments: {} })
+    expect(result.structuredContent).toEqual({ available: true, tool: 'custom-status' })
+
+    await client.close()
+    await server.close()
+  })
+
+  it('rejects invalid custom extension layouts and duplicate plugin names', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-redteam-invalid-tool-'))
+    temporaryDirectories.push(directory)
+
+    expect(await loadExternalToolPluginsFromEnvironment('')).toEqual([])
+    await expect(loadExternalToolPlugins([join(directory, 'missing')])).rejects.toThrow(
+      '工具插件路径不存在',
+    )
+
+    const emptyDirectory = join(directory, 'empty-tool')
+    await mkdir(emptyDirectory)
+    await expect(loadExternalToolPlugins([emptyDirectory])).rejects.toThrow(
+      '缺少 index.js 或 index.mjs',
+    )
+
+    const mismatchedDirectory = join(directory, 'expected-name')
+    await mkdir(mismatchedDirectory)
+    await writeFile(
+      join(mismatchedDirectory, 'index.mjs'),
+      "export default { name: 'different-name', register() {} }",
+    )
+    await expect(loadExternalToolPlugins([mismatchedDirectory])).rejects.toThrow('必须与插件名称')
+
+    expect(() => defineToolPlugin({ name: 'Invalid Name', register() {} })).toThrow('插件名称')
+    expect(() =>
+      defineToolPlugin({ name: 'missing-register' } as unknown as RedTeamToolPlugin),
+    ).toThrow('缺少 register()')
+    expect(() => createRedTeamToolsServer({ plugins: [{ name: 'nmap', register() {} }] })).toThrow(
+      '插件名称重复',
+    )
   })
 
   it('stays available when a local binary has not been installed', async () => {

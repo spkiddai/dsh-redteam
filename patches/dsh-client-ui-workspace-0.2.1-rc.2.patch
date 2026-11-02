@@ -1,8 +1,0 @@
-diff --git a/lib/types/client/index.d.ts b/lib/types/client/index.d.ts
---- a/lib/types/client/index.d.ts
-+++ b/lib/types/client/index.d.ts
-@@ -1,3 +1,4 @@
-+export type {} from './contract/toast.ts';
- import type { Context } from '@deepseek-ai/cordis';
- import type { WorkspaceId, WorkspaceSnapshot } from '@deepseek-ai/dsh-api-workspace-controller/client';
- import type { RemoteEndpoint } from '@deepseek-ai/dsh-api-remote-access/client';

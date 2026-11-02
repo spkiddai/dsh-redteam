@@ -24,13 +24,6 @@ export interface FindingStatusChange {
   readonly to: FindingStatus
   readonly reason: string
   readonly changedAt: string
-  readonly validation?: FindingValidation
-}
-
-export interface FindingValidation {
-  readonly method: 'code-review' | 'authorized-test' | 'regression-test'
-  readonly procedure: string
-  readonly observation: string
 }
 
 export type ReportFormat = 'html' | 'json' | 'markdown' | 'sarif' | 'word' | 'xml'
@@ -405,11 +398,9 @@ export interface Finding {
   readonly detectedAt: string
   readonly ruleVersion?: string
   readonly statusHistory?: FindingStatusChange[]
-  readonly validation?: FindingValidation
 }
 
 export interface Assessment {
-  readonly coverage?: readonly import('./assessment-coverage.js').CoverageEntry[]
   readonly schemaVersion: 1
   readonly id: string
   readonly mode: 'review'
@@ -507,7 +498,7 @@ export interface ReportResult {
 
 export interface RedTeamStatus {
   readonly plugin: 'dsh-redteam'
-  readonly version: '1.4.0'
+  readonly version: '1.3.2'
   readonly mode: 'review'
   readonly workspaceRoot: string
   readonly storageRoot: string

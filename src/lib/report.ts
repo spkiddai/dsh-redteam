@@ -1,4 +1,3 @@
-import { assessmentReadiness } from './assessment-coverage.js'
 import { strToU8, zipSync } from 'fflate'
 import type { Assessment, FindingSeverity, FindingStatus, ReportFormat } from './types.js'
 
@@ -34,25 +33,6 @@ function statusCounts(assessment: Assessment): Record<FindingStatus, number> {
       assessment.findings.filter((finding) => finding.status === status).length,
     ]),
   ) as Record<FindingStatus, number>
-}
-
-function coverageLines(assessment: Assessment): string[] {
-  const readiness = assessmentReadiness(assessment)
-  return [
-    'Coverage and limitations / 检查覆盖与限制',
-    'Coverage provenance: agent-reported. Entries describe reported work, not proof of exhaustive testing.',
-    ...readiness.warnings.map((w) => `WARNING: ${w}`),
-    ...(assessment.coverage ?? []).map(
-      (row) =>
-        `${row.surface} | ${row.riskArea} | ${row.outcome} | ${row.evidence} | ${row.findingIds.join(', ')}`,
-    ),
-    ...assessment.findings
-      .filter((f) => f.validation)
-      .map(
-        (f) =>
-          `Validation ${f.id} (${f.validation!.method}): ${f.validation!.procedure} — ${f.validation!.observation}`,
-      ),
-  ]
 }
 
 export function renderMarkdown(assessment: Assessment): string {
@@ -111,17 +91,11 @@ export function renderMarkdown(assessment: Assessment): string {
       }
     }
   }
-  lines.push(
-    '## Coverage and limitations',
-    '',
-    ...coverageLines(assessment).map(markdownEscape),
-    '',
-  )
   return `${lines.join('\n')}\n`
 }
 
 export function renderJson(assessment: Assessment): string {
-  return `${JSON.stringify({ ...assessment, readiness: assessmentReadiness(assessment) }, undefined, 2)}\n`
+  return `${JSON.stringify(assessment, undefined, 2)}\n`
 }
 
 export function renderHtml(assessment: Assessment): string {
@@ -155,9 +129,6 @@ export function renderHtml(assessment: Assessment): string {
 <section class="meta"><strong>Assessment:</strong> ${xmlEscape(assessment.id)}<br><strong>Scan root:</strong> ${xmlEscape(assessment.scanRoot)}<br><strong>Completed:</strong> ${xmlEscape(assessment.completedAt)}<br><strong>Files scanned:</strong> ${String(assessment.filesScanned)}</section>
 <section class="summary">${SEVERITY_ORDER.map((severity) => `<div><strong>${String(counts[severity])}</strong>${severity.toUpperCase()}</div>`).join('')}</section>
 <section class="meta"><strong>Workflow:</strong> ${STATUS_ORDER.map((status) => `${xmlEscape(status)} ${String(statuses[status])}`).join(' · ')}</section>
-<section class="meta"><h2>检查覆盖与限制</h2>${coverageLines(assessment)
-    .map((line) => `<p>${xmlEscape(line)}</p>`)
-    .join('')}</section>
 ${findings || '<section class="finding"><p>No findings.</p></section>'}
 </body></html>\n`
 }
@@ -194,9 +165,6 @@ export function renderXml(assessment: Assessment): string {
     <finding-count>${String(assessment.findings.length)}</finding-count>
   </assessment>
   <notice>Findings are candidates until a human or an authorized verification confirms them.</notice>
-  <coverage>${coverageLines(assessment)
-    .map((line) => `<item>${xmlEscape(line)}</item>`)
-    .join('')}</coverage>
   <findings>
 ${findings}
   </findings>
@@ -246,7 +214,6 @@ export function renderWord(assessment: Assessment): Uint8Array {
       }
     }
   }
-  paragraphs.push(...coverageLines(assessment).map((line) => wordParagraph(line)))
   const document = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paragraphs.join('')}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>`
   const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="paragraph" w:styleId="Title"><w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="36"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="28"/></w:rPr></w:style><w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/><w:basedOn w:val="Normal"/><w:rPr><w:b/><w:sz w:val="24"/></w:rPr></w:style></w:styles>`
   const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/></Types>`
@@ -276,10 +243,6 @@ export function renderSarif(assessment: Assessment): string {
     $schema: 'https://json.schemastore.org/sarif-2.1.0.json',
     runs: [
       {
-        properties: {
-          readiness: assessmentReadiness(assessment),
-          coverage: assessment.coverage ?? [],
-        },
         results: assessment.findings.map((finding) => ({
           level:
             finding.severity === 'critical' || finding.severity === 'high'
@@ -301,7 +264,6 @@ export function renderSarif(assessment: Assessment): string {
           message: { text: `${finding.title}: ${finding.evidence}` },
           properties: {
             status: finding.status,
-            ...(finding.validation ? { validation: finding.validation } : {}),
             ...(finding.ruleVersion === undefined ? {} : { ruleVersion: finding.ruleVersion }),
           },
           ruleId: finding.ruleId,
@@ -324,7 +286,7 @@ export function renderSarif(assessment: Assessment): string {
               name: finding.title,
               properties: { tags: [finding.cwe, finding.category] },
             })),
-            version: '1.4.0',
+            version: '1.3.2',
           },
         },
       },

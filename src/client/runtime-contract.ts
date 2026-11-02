@@ -1,4 +1,4 @@
-/** Narrow dashboard-facing contracts for DSH 0.2.1-rc.2. */
+/** Narrow dashboard-facing contracts for DSH 0.1.2's split client runtime. */
 
 export type SessionId = string
 
@@ -42,7 +42,7 @@ export interface RunningToolCall {
   readonly name: string
 }
 
-/** Normalized dashboard read model produced from the DSH Chat target and Session lifecycle. */
+/** Normalized dashboard read model produced from either DSH client architecture. */
 export interface DashboardConversationSnapshot {
   readonly hasMore: boolean
   readonly loadingOlder: boolean
@@ -71,15 +71,13 @@ export interface SessionFaceLike extends ObservableSnapshot<unknown> {
 }
 
 export interface SessionSummaryLike {
-  readonly title?: string
-  readonly id: SessionId
-  readonly retainedBy: Readonly<{ mainView?: number }>
   readonly cwd?: string
   readonly projectionValues?: Readonly<Record<string, unknown>>
 }
 
 export interface SessionListStateLike {
   readonly byId: Readonly<Record<string, SessionSummaryLike | undefined>>
+  readonly current: SessionId | undefined
 }
 
 export type UseSessionsLike = <Selected>(
@@ -88,9 +86,4 @@ export type UseSessionsLike = <Selected>(
 
 export function isRedteamSession(summary: SessionSummaryLike | undefined): boolean {
   return summary?.projectionValues?.agentPreset === 'redteam'
-}
-
-/** The main view owns selection in DSH 0.2.1; catalog order is not selection. */
-export function currentSession(state: SessionListStateLike): SessionSummaryLike | undefined {
-  return Object.values(state.byId).find((session) => (session?.retainedBy.mainView ?? 0) > 0)
 }

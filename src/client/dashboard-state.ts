@@ -82,12 +82,6 @@ export interface ProjectSummary {
 }
 
 export interface DashboardState {
-  readonly coverage?: {
-    readonly count: number
-    readonly ready: boolean
-    readonly warnings: readonly string[]
-  }
-
   readonly assetMap: AssetMapSummary | undefined
   readonly findings: readonly FindingPreview[]
   readonly findingsTotal: number | undefined
@@ -99,7 +93,6 @@ export interface DashboardState {
 
 const REDTEAM_TOOLS = new Set([
   'redteam_status',
-  'redteam_mcp_permissions',
   'redteam_knowledge_status',
   'redteam_project_start',
   'redteam_project_remember',
@@ -117,7 +110,6 @@ const REDTEAM_TOOLS = new Set([
   'redteam_scan',
   'redteam_findings',
   'redteam_update_finding',
-  'redteam_coverage',
   'redteam_report',
 ])
 
@@ -428,7 +420,6 @@ export function deriveDashboardState(
     }
   }
 
-  let coverage: DashboardState['coverage']
   let scan: ScanSummary | undefined
   let assetMap: AssetMapSummary | undefined
   let report: ReportSummary | undefined
@@ -438,17 +429,10 @@ export function deriveDashboardState(
   let projectRecall: Record<string, unknown> | undefined
   let frontierPreview: readonly AssetNodePreview[] | undefined
   let seedPreview: AssetNodePreview | undefined
-  const updates: Array<{ assessmentId: unknown; finding: FindingPreview }> = []
-  let findingsAssessment: unknown
   for (const node of resultNodes(snapshot).toReversed()) {
     const name = node.call?.name
     const value = parseJson(textContent(node))
     if (value === undefined) continue
-    if (name === 'redteam_update_finding' && findingsTotal === undefined) {
-      const raw = record(value.finding)
-      const finding = raw === undefined ? undefined : findingPreview(raw)
-      if (finding !== undefined) updates.push({ assessmentId: value.assessmentId, finding })
-    }
     if (name === 'redteam_scan' && scan === undefined) scan = scanSummary(value)
     if (name?.startsWith('redteam_asset_map_') === true && assetMap === undefined) {
       assetMap = assetMapSummary(value)
@@ -462,18 +446,6 @@ export function deriveDashboardState(
         seedPreview ??= candidate.seed
       }
     }
-    if (
-      name === 'redteam_coverage' &&
-      coverage === undefined &&
-      typeof value.coverageCount === 'number' &&
-      typeof value.ready === 'boolean' &&
-      Array.isArray(value.warnings)
-    )
-      coverage = {
-        count: value.coverageCount,
-        ready: value.ready,
-        warnings: value.warnings.filter((w): w is string => typeof w === 'string'),
-      }
     if (name === 'redteam_report' && report === undefined) report = reportSummary(value)
     if (name === 'redteam_knowledge_status' && project === undefined) {
       project = projectSummary(value)
@@ -483,7 +455,6 @@ export function deriveDashboardState(
     }
     if (name === 'redteam_project_recall' && projectRecall === undefined) projectRecall = value
     if (name === 'redteam_findings' && findingsTotal === undefined) {
-      findingsAssessment = value.assessmentId
       findingsTotal = finiteNumber(value.total)
       findings = Array.isArray(value.findings)
         ? value.findings
@@ -493,14 +464,6 @@ export function deriveDashboardState(
         : []
     }
   }
-
-  const latestUpdates = new Map<string, FindingPreview>()
-  for (const update of updates) {
-    if (update.assessmentId === findingsAssessment && !latestUpdates.has(update.finding.id)) {
-      latestUpdates.set(update.finding.id, update.finding)
-    }
-  }
-  findings = findings.map((finding) => latestUpdates.get(finding.id) ?? finding)
 
   if (assetMap !== undefined) {
     assetMap = {
@@ -512,14 +475,5 @@ export function deriveDashboardState(
   if (projectRecall !== undefined) project = withProjectEvents(project, projectRecall)
 
   const runningTool = snapshot.runningCalls.find((call) => REDTEAM_TOOLS.has(call.name))?.name
-  return {
-    assetMap,
-    findings,
-    findingsTotal,
-    project,
-    report,
-    runningTool,
-    scan,
-    ...(coverage ? { coverage } : {}),
-  }
+  return { assetMap, findings, findingsTotal, project, report, runningTool, scan }
 }

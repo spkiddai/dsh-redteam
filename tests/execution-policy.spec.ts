@@ -40,6 +40,13 @@ function policy(overrides: Partial<RedTeamExecutionPolicy> = {}): RedTeamExecuti
 }
 
 describe('red-team execution policy', () => {
+  it('leaves unrelated tools to Harness and denies unmanaged local security tools', () => {
+    expect(evaluateRedTeamToolPolicy(policy(), 'bash', {})).toEqual({ kind: 'proceed' })
+    expect(
+      evaluateRedTeamToolPolicy(policy(), 'mcp__redteam-tools__unknown_tool', {}),
+    ).toMatchObject({ kind: 'deny', reason: expect.stringContaining('未定义权限规则') })
+  })
+
   it('requires an explicitly enabled tool', () => {
     expect(
       evaluateRedTeamToolPolicy(
@@ -113,47 +120,6 @@ describe('red-team execution policy', () => {
         targets: ['api.test.local'],
       }),
     ).toMatchObject({ kind: 'deny' })
-  })
-
-  it('denies every unknown MCP namespace and does not trust matching leaf names', () => {
-    for (const name of [
-      'mcp__external__scan',
-      'mcp__external__nmap_scan',
-      'mcp__redteam-tools__unknown',
-    ]) {
-      expect(
-        evaluateRedTeamToolPolicy(policy({ operationMode: 'full' }), name, {
-          targets: ['example.com'],
-        }),
-      ).toMatchObject({ kind: 'deny' })
-    }
-    expect(evaluateRedTeamToolPolicy(policy(), 'read_file', {})).toEqual({ kind: 'proceed' })
-  })
-
-  it('requires all-ports authorization for IP-based active operations', () => {
-    const ip = {
-      mode: 'asset' as const,
-      targetId: 'ip',
-      targetLabel: '127.0.0.1',
-      targetType: 'ip',
-    }
-    const current = policy({ operationMode: 'full', testingScope: [ip] })
-    for (const [name, args] of [
-      ['nmap_scan', { targets: ['127.0.0.1'], ports: '1-65535' }],
-      ['burp_proxy_request', { url: 'http://127.0.0.1:8080/' }],
-      ['metasploit_check', { rhost: '127.0.0.1', rport: 8080 }],
-    ] as const) {
-      expect(evaluateRedTeamToolPolicy(current, `mcp__redteam-tools__${name}`, args)).toMatchObject(
-        { kind: 'deny' },
-      )
-      expect(
-        evaluateRedTeamToolPolicy(
-          { ...current, testingScope: [{ ...ip, mode: 'all-ports' }] },
-          `mcp__redteam-tools__${name}`,
-          args,
-        ),
-      ).toEqual({ kind: 'proceed' })
-    }
   })
 
   it('validates policies at the browser-to-host boundary', () => {

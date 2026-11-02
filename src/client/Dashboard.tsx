@@ -1,19 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { McpPermission } from '../lib/mcp-permission-types.js'
+import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {
   DashboardConversationSnapshot,
   DashboardConversationSource,
   SessionId,
   UseSessionsLike,
 } from './runtime-contract.js'
-import { currentSession, isRedteamSession } from './runtime-contract.js'
+import { isRedteamSession } from './runtime-contract.js'
 import {
-  IconAgentPresetOutlineMedium,
-  IconListPenOutlineMedium,
-  IconPlusOutlineMedium,
-  IconSearchOutlineMedium,
-  IconSendOutlineMedium,
-  IconWarningOutlineMedium,
+  IconAgentPresetOutline16,
+  IconListPenOutline16,
+  IconPanelLeftOutline16,
+  IconPlusOutline16,
+  IconSearchOutline16,
+  IconSendOutline16,
+  IconWarningOutline16,
   MarkdownText,
   Tooltip,
   type MarkdownLabels,
@@ -28,13 +29,12 @@ import {
 } from './dashboard-state.js'
 import {
   assetMapPrompt,
-  mcpPermissionPrompt,
   reportExportPrompt,
   vulnerabilityAnalysisPrompt,
   vulnerabilityValidationPrompt,
 } from './prompts.js'
 
-export type ModuleId = 'project' | 'discovery' | 'testing' | 'tools'
+type ModuleId = 'project' | 'discovery' | 'testing' | 'tools'
 export type OperationMode = 'passive' | 'active-scan' | 'exploitation' | 'full'
 type ReportFormat = 'word' | 'html' | 'markdown'
 type ReportTemplate = 'project' | 'vulnerability' | 'asset'
@@ -53,29 +53,13 @@ export interface DashboardExecutionPolicy {
   readonly testingScope: readonly TestingScopeRule[]
 }
 
-export interface McpConnection {
+export interface DashboardToolAvailability {
   readonly id: string
-  readonly label: string
-  readonly endpoint: string
-  readonly transport: 'http' | 'stdio'
-  readonly connected: boolean
-  readonly tools: readonly string[]
-  readonly executable: boolean
-  readonly permissions: readonly McpPermission[]
-  readonly reviewId: string
+  readonly installed: boolean
 }
 
 export interface DashboardRuntime {
-  confirmMcpPermissions(
-    sessionId: SessionId,
-    connectionId: string,
-    reviewId: string,
-  ): Promise<McpConnection>
-  mcpConnections(sessionId: SessionId): Promise<readonly McpConnection[]>
-  connectMcp(
-    sessionId: SessionId,
-    connection: { label: string; endpoint: string; transport: McpTransport },
-  ): Promise<McpConnection>
+  closeNativeDetails(): void
   createProjectSession(input: {
     readonly name: string
     readonly path: string
@@ -101,6 +85,11 @@ export interface DashboardRuntime {
   ): Promise<{ error?: string; ok: boolean }>
   conversation(sessionId: SessionId): DashboardConversationSource | undefined
   loadOlder(sessionId: SessionId): Promise<void>
+  toolAvailability(): Promise<{
+    readonly error?: string
+    readonly ok: boolean
+    readonly tools: readonly DashboardToolAvailability[]
+  }>
   updateExecutionPolicy(
     sessionId: SessionId,
     policy: DashboardExecutionPolicy,
@@ -121,13 +110,9 @@ export interface DashboardModelOption extends DashboardModelSelection {
   readonly providerName: string
 }
 
-export interface DashboardProps {
+export interface DashboardProps extends Omit<PropsRuntime<'shell.overlay'>, 'useSessions'> {
   readonly runtime: DashboardRuntime
   readonly useSessions: UseSessionsLike
-  readonly activeModule?: ModuleId
-  readonly onModuleChange?: (module: ModuleId) => void
-  readonly showNavigation?: boolean
-  readonly context?: { name: string; project: boolean }
 }
 
 const MODULES: readonly { id: ModuleId; label: string }[] = [
@@ -233,12 +218,7 @@ function exploitationTypesForFinding(finding: FindingPreview): Choice[] {
 }
 
 interface SecurityToolChoice {
-  readonly executable?: boolean
-  readonly permissions?: readonly McpPermission[]
-  readonly reviewId?: string
   readonly category: string
-  readonly connected?: boolean
-  readonly toolCount?: number
   readonly endpoint?: string
   readonly id: string
   readonly label: string
@@ -246,14 +226,11 @@ interface SecurityToolChoice {
   readonly transport?: McpTransport
 }
 
-type McpTransport = 'http' | 'stdio'
-
-function connectionChoice(connection: McpConnection): SecurityToolChoice {
-  return { ...connection, category: '扩展工具', source: 'mcp', toolCount: connection.tools.length }
-}
+type McpTransport = 'http' | 'sse' | 'stdio'
 
 const MCP_TRANSPORTS: readonly Choice[] = [
   { id: 'http', label: 'HTTP' },
+  { id: 'sse', label: 'SSE' },
   { id: 'stdio', label: 'STDIO' },
 ]
 
@@ -311,10 +288,10 @@ function ChoiceGrid({
 }
 
 function ModuleIcon({ name, size = 18 }: { name: ModuleId; size?: number }) {
-  if (name === 'discovery') return <IconSearchOutlineMedium size={size} />
-  if (name === 'testing') return <IconWarningOutlineMedium size={size} />
-  if (name === 'tools') return <IconPlusOutlineMedium size={size} />
-  return <IconListPenOutlineMedium size={size} />
+  if (name === 'discovery') return <IconSearchOutline16 size={size} />
+  if (name === 'testing') return <IconWarningOutline16 size={size} />
+  if (name === 'tools') return <IconPlusOutline16 size={size} />
+  return <IconListPenOutline16 size={size} />
 }
 
 function useConversation(
@@ -756,7 +733,7 @@ function SessionConversation({
           />
           <div className="dsh-redteam-dashboard__conversation-toolbar">
             <span className="dsh-redteam-dashboard__conversation-add" aria-hidden="true">
-              <IconPlusOutlineMedium size={16} />
+              <IconPlusOutline16 size={16} />
             </span>
             <Tooltip label="发送消息" side="top" delayMs={300}>
               <button
@@ -765,7 +742,7 @@ function SessionConversation({
                 type="submit"
                 disabled={busy || message.trim() === ''}
               >
-                <IconSendOutlineMedium size={16} />
+                <IconSendOutline16 size={16} />
               </button>
             </Tooltip>
           </div>
@@ -859,7 +836,6 @@ function conversationUsage(snapshot: DashboardConversationSnapshot | undefined):
 
 function ProjectModule({
   busy,
-  context,
   cwd,
   loadOlder,
   modelBusy,
@@ -874,7 +850,6 @@ function ProjectModule({
   testingScope,
 }: {
   busy: boolean
-  context: DashboardProps['context']
   cwd: string | undefined
   loadOlder: () => void
   modelBusy: boolean
@@ -904,44 +879,28 @@ function ProjectModule({
   const testingScopeLabels = useMemo(() => testingScopeDescriptions(testingScope), [testingScope])
   return (
     <>
-      <ModuleHeader title={context ? '任务工作台' : '项目状态'} />
+      <ModuleHeader title="项目状态" />
       <div className="dsh-redteam-dashboard__project-primary-grid">
         <section className="dsh-redteam-dashboard__card" data-project-panel="project-overview">
           <div className="dsh-redteam-dashboard__card-heading dsh-redteam-dashboard__card-heading--status">
-            <h4 className="dsh-redteam-dashboard__card-title">
-              {context ? '当前范围' : '项目概览'}
-            </h4>
+            <h4 className="dsh-redteam-dashboard__card-title">项目概览</h4>
             <span className="dsh-redteam-dashboard__badge" data-kind="local">
-              {context
-                ? context.project
-                  ? '项目任务'
-                  : '独立使用'
-                : project?.currentProjectId === undefined
-                  ? '未创建'
-                  : '进行中'}
+              {project?.currentProjectId === undefined ? '未创建' : '进行中'}
             </span>
           </div>
           <dl className="dsh-redteam-dashboard__definition-list">
             <div>
               <dt>名称</dt>
-              <dd>{context?.name ?? project?.currentProjectName ?? '尚未创建'}</dd>
+              <dd>{project?.currentProjectName ?? '尚未创建'}</dd>
             </div>
             <div>
-              <dt>{context ? '关联项目' : '项目 ID'}</dt>
-              <dd>
-                {context
-                  ? context.project
-                    ? context.name
-                    : '不关联项目'
-                  : (project?.currentProjectId ?? '—')}
-              </dd>
+              <dt>项目 ID</dt>
+              <dd>{project?.currentProjectId ?? '—'}</dd>
             </div>
-            {!context && (
-              <div>
-                <dt>工作区</dt>
-                <dd title={cwd}>{cwd ?? '正在解析…'}</dd>
-              </div>
-            )}
+            <div>
+              <dt>工作区</dt>
+              <dd title={cwd}>{cwd ?? '正在解析…'}</dd>
+            </div>
           </dl>
           <div className="dsh-redteam-dashboard__progress-overview">
             <strong>{projectProgress}%</strong>
@@ -1082,15 +1041,9 @@ function AssetCollectionControls({
 function AssetOverviewModule({
   projectName,
   state,
-  busy,
-  run,
-  standalone,
 }: {
   readonly projectName: string
   readonly state: DashboardState
-  readonly busy: boolean
-  readonly run: (text: string) => void
-  readonly standalone: boolean
 }) {
   const findingCount = state.findingsTotal ?? state.scan?.findingCount ?? 0
   const inventory = state.assetMap?.inventory
@@ -1147,7 +1100,6 @@ function AssetOverviewModule({
   return (
     <>
       <ModuleHeader title="资产情况" />
-      <AssetCollectionControls busy={busy} run={run} />
       <section className="dsh-redteam-dashboard__card dsh-redteam-dashboard__card--wide">
         <div className="dsh-redteam-dashboard__card-heading">
           <h4 className="dsh-redteam-dashboard__card-title">资产概览</h4>
@@ -1173,24 +1125,16 @@ function AssetOverviewModule({
           <h4 className="dsh-redteam-dashboard__card-title">资产详情</h4>
           <span className="dsh-redteam-dashboard__badge" data-kind="local">
             {state.assetMap === undefined
-              ? standalone
-                ? '暂无资产'
-                : '仅项目节点'
+              ? '仅项目节点'
               : `${String(state.assetMap.nodeCount)} 个资产`}
           </span>
         </div>
-        {standalone && !state.assetMap ? (
-          <p className="dsh-redteam-dashboard__empty">
-            尚无资产记录，填写上方目标即可采集，无需创建项目。
-          </p>
-        ) : (
-          <AssetGraph
-            assetMap={state.assetMap}
-            findingCount={findingCount}
-            findings={state.findings}
-            projectName={projectName}
-          />
-        )}
+        <AssetGraph
+          assetMap={state.assetMap}
+          findingCount={findingCount}
+          findings={state.findings}
+          projectName={projectName}
+        />
       </section>
     </>
   )
@@ -1228,7 +1172,7 @@ function scopeModeOptions(target: AssetNodePreview): readonly Choice[] {
   }
   if (target.type === 'ip') {
     return [
-      { id: 'asset', label: '仅当前 IP（不授权端口访问）' },
+      { id: 'asset', label: '仅当前 IP' },
       { id: 'all-ports', label: '当前 IP 的全部端口' },
     ]
   }
@@ -1405,7 +1349,7 @@ function TestingScopePanel({
       </p>
       {selectableTargets.length === 0 ? (
         <div className="dsh-redteam-dashboard__scope-empty">
-          <IconSearchOutlineMedium size={20} />
+          <IconSearchOutline16 size={20} />
           <p className="dsh-redteam-dashboard__empty">完成信息收集后选择授权目标。</p>
         </div>
       ) : (
@@ -1499,14 +1443,14 @@ function VulnerabilityAnalysisControls({
   return (
     <section className="dsh-redteam-dashboard__card" data-project-action="vulnerability-analysis">
       <div className="dsh-redteam-dashboard__card-heading">
-        <h4 className="dsh-redteam-dashboard__card-title">已有证据分析</h4>
+        <h4 className="dsh-redteam-dashboard__card-title">漏洞扫描</h4>
         <span className="dsh-redteam-dashboard__badge" data-kind="local">
           {testingScope.length === 0
             ? '待确认范围'
             : `${String(assets.length)} 个资产 · ${String(analysisTypes.length)} 类`}
         </span>
       </div>
-      <div aria-label="证据分析类型" role="group">
+      <div aria-label="漏洞扫描类型" role="group">
         <ChoiceGrid
           choices={analysisTypes}
           disabled={busy || testingScope.length === 0}
@@ -1531,7 +1475,7 @@ function VulnerabilityAnalysisControls({
             }
           }}
         >
-          分析已有证据
+          开始扫描
         </button>
       </div>
     </section>
@@ -1683,30 +1627,6 @@ function ResultExportControls({
           导出报告
         </button>
       </div>
-      <button
-        className="dsh-redteam-dashboard__button"
-        type="button"
-        disabled={busy || state.scan === undefined}
-        onClick={() =>
-          run(
-            '请调用 redteam_coverage，action=list，读取当前评估的检查覆盖和报告就绪情况。说明未完成项和证据缺口，不要自行补写没有执行的检查。',
-          )
-        }
-      >
-        检查覆盖与证据
-      </button>
-      {state.coverage && (
-        <div className="dsh-redteam-dashboard__workspace">
-          <strong>
-            已记录 {state.coverage.count} 项检查 ·{' '}
-            {state.coverage.ready ? '无已记录的未完成项' : '仍有检查限制'}
-          </strong>
-          <p>来源：Agent 自报，不能证明已穷尽所有风险。</p>
-          {state.coverage.warnings.map((warning) => (
-            <p key={warning}>{warning}</p>
-          ))}
-        </div>
-      )}
       {state.report !== undefined && (
         <div className="dsh-redteam-dashboard__workspace" title={state.report.path}>
           最近导出：{state.report.format.toUpperCase()} · {state.report.path}
@@ -1721,27 +1641,18 @@ function ToolIntegrationControls({
   enabledToolIds,
   mcpTools,
   setEnabledToolIds,
-  connectMcp,
-  reviewMcp,
-  confirmMcp,
+  setMcpTools,
   snapshot,
+  toolAvailability,
 }: {
   readonly busy: boolean
   readonly enabledToolIds: readonly string[]
   readonly mcpTools: readonly SecurityToolChoice[]
   readonly setEnabledToolIds: (next: string[]) => void
-  readonly connectMcp: (input: {
-    label: string
-    endpoint: string
-    transport: McpTransport
-  }) => Promise<void>
+  readonly setMcpTools: (next: SecurityToolChoice[]) => void
   readonly snapshot: DashboardConversationSnapshot | undefined
-  readonly reviewMcp: (connectionId: string) => Promise<void>
-  readonly confirmMcp: (connectionId: string, reviewId: string) => Promise<void>
+  readonly toolAvailability: Readonly<Record<string, boolean>>
 }) {
-  const [reviewBusy, setReviewBusy] = useState(false)
-  const [connecting, setConnecting] = useState(false)
-  const [connectionError, setConnectionError] = useState<string>()
   const [mcpName, setMcpName] = useState('')
   const [mcpEndpoint, setMcpEndpoint] = useState('')
   const [mcpTransport, setMcpTransport] = useState<McpTransport>('http')
@@ -1756,37 +1667,34 @@ function ToolIntegrationControls({
     setSelectedToolIds([...enabledToolIds])
   }, [enabledToolIds])
 
-  const reviewAction = async (action: () => Promise<void>): Promise<void> => {
-    if (reviewBusy) return
-    setReviewBusy(true)
-    setConnectionError(undefined)
-    try {
-      await action()
-    } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setReviewBusy(false)
-    }
-  }
-
-  const addMcpTool = async (): Promise<void> => {
-    if (connecting || busy) return
-    setConnecting(true)
-    setConnectionError(undefined)
-    try {
-      await connectMcp({
-        label: mcpName.trim(),
-        endpoint: mcpEndpoint.trim(),
-        transport: mcpTransport,
-      })
+  const addMcpTool = (): void => {
+    const label = mcpName.trim()
+    const endpoint = mcpEndpoint.trim()
+    if (label === '' || endpoint === '') return
+    const normalized = label.toLocaleLowerCase().replace(/[^\p{L}\p{N}]+/gu, '-')
+    const id = `mcp-${normalized || String(mcpTools.length + 1)}`
+    if (
+      tools.some(
+        (tool) => tool.id === id || tool.label.toLocaleLowerCase() === label.toLocaleLowerCase(),
+      )
+    ) {
       setMcpName('')
-      setMcpEndpoint('')
-      setMcpTransport('http')
-    } catch (error) {
-      setConnectionError(error instanceof Error ? error.message : String(error))
-    } finally {
-      setConnecting(false)
+      return
     }
+    setMcpTools([
+      ...mcpTools,
+      {
+        category: '扩展工具',
+        endpoint,
+        id,
+        label,
+        source: 'mcp',
+        transport: mcpTransport,
+      },
+    ])
+    setMcpName('')
+    setMcpEndpoint('')
+    setMcpTransport('http')
   }
   return (
     <>
@@ -1805,87 +1713,42 @@ function ToolIntegrationControls({
           <div className="dsh-redteam-dashboard__tool-grid">
             {tools.map((tool) => {
               const checked = selectedToolIds.includes(tool.id)
+              const missing = tool.source === 'built-in' && toolAvailability[tool.id] === false
               return (
-                <div
+                <label
                   className="dsh-redteam-dashboard__tool-choice"
                   data-selected={checked || undefined}
                   key={tool.id}
                 >
-                  <label>
-                    <input
-                      checked={checked}
-                      disabled={busy || (tool.source === 'mcp' && !tool.executable)}
-                      type="checkbox"
-                      onChange={() =>
-                        setSelectedToolIds(
-                          checked
-                            ? selectedToolIds.filter((id) => id !== tool.id)
-                            : [...selectedToolIds, tool.id],
-                        )
-                      }
-                    />
-                    <span>
-                      <strong>{tool.label}</strong>
-                      <small>
-                        {tool.source === 'mcp'
-                          ? `MCP · ${tool.transport?.toUpperCase() ?? '扩展工具'}`
-                          : `内置 · ${tool.category}`}
+                  <input
+                    checked={checked}
+                    disabled={busy}
+                    type="checkbox"
+                    onChange={() =>
+                      setSelectedToolIds(
+                        checked
+                          ? selectedToolIds.filter((id) => id !== tool.id)
+                          : [...selectedToolIds, tool.id],
+                      )
+                    }
+                  />
+                  <span>
+                    <strong>{tool.label}</strong>
+                    <small>
+                      {tool.source === 'mcp'
+                        ? `MCP · ${tool.transport?.toUpperCase() ?? '扩展工具'}`
+                        : `内置 · ${tool.category}`}
+                    </small>
+                    {tool.source === 'mcp' && tool.endpoint !== undefined && (
+                      <small title={tool.endpoint}>{tool.endpoint}</small>
+                    )}
+                    {missing && (
+                      <small className="dsh-redteam-dashboard__tool-installation-warning">
+                        工具未安装
                       </small>
-                      {tool.source === 'mcp' && (
-                        <small>
-                          {tool.connected
-                            ? `已连接 · ${tool.toolCount ?? 0} 个工具；${tool.executable ? '权限已确认，可勾选启用' : '等待 AI 权限建议或用户确认，执行已禁用'}`
-                            : '连接失败；执行已禁用'}
-                        </small>
-                      )}
-                      {tool.source === 'mcp' && tool.endpoint !== undefined && (
-                        <small title={tool.endpoint}>{tool.endpoint}</small>
-                      )}
-                    </span>
-                  </label>
-                  {tool.source === 'mcp' && (
-                    <div
-                      className="dsh-redteam-dashboard__permission-review"
-                      aria-label={`${tool.label} 的 AI 权限建议`}
-                    >
-                      {(tool.permissions ?? []).map((permission) => (
-                        <p key={permission.toolName}>
-                          <strong>{permission.toolName.split('__').at(-1)}</strong>：
-                          {permission.mode === 'blocked'
-                            ? '禁止使用'
-                            : OPERATION_MODES.find((mode) => mode.id === permission.mode)?.label}
-                          {permission.targetKind !== 'none' &&
-                            ` · 目标参数：${permission.targetField}（${permission.targetKind}）`}
-                          <br />
-                          {permission.reason} · {permission.confirmed ? '已确认' : '待确认'}
-                        </p>
-                      ))}
-                      <button
-                        className="dsh-redteam-dashboard__button"
-                        type="button"
-                        disabled={busy || reviewBusy || !tool.connected}
-                        onClick={() => void reviewAction(() => reviewMcp(tool.id))}
-                      >
-                        AI 重新评估权限
-                      </button>
-                      <button
-                        className="dsh-redteam-dashboard__button"
-                        type="button"
-                        disabled={
-                          busy ||
-                          reviewBusy ||
-                          !tool.connected ||
-                          !tool.permissions?.some((p) => !p.confirmed)
-                        }
-                        onClick={() =>
-                          void reviewAction(() => confirmMcp(tool.id, tool.reviewId ?? ''))
-                        }
-                      >
-                        确认 AI 权限建议
-                      </button>
-                    </div>
-                  )}
-                </div>
+                    )}
+                  </span>
+                </label>
               )
             })}
           </div>
@@ -1903,15 +1766,14 @@ function ToolIntegrationControls({
           <section className="dsh-redteam-dashboard__add-tool-panel">
             <h5 className="dsh-redteam-dashboard__subheading">添加工具</h5>
             <p className="dsh-redteam-dashboard__tool-description">
-              添加后 AI 会根据工具说明和参数建议最低权限，确认建议后才可启用。STDIO
-              仅接受可执行文件绝对路径。
+              接入新的 MCP 工具后，可在上方勾选并确认启用。
             </p>
             <form
               aria-label="添加工具"
               className="dsh-redteam-dashboard__mcp-tool-form"
               onSubmit={(event) => {
                 event.preventDefault()
-                void addMcpTool()
+                addMcpTool()
               }}
             >
               <label className="dsh-redteam-dashboard__mcp-tool-field">
@@ -1929,11 +1791,7 @@ function ToolIntegrationControls({
                 <input
                   aria-label="接口地址"
                   className="dsh-redteam-dashboard__input"
-                  placeholder={
-                    mcpTransport === 'stdio'
-                      ? '输入可执行文件绝对路径'
-                      : '输入 Streamable HTTP 接口地址'
-                  }
+                  placeholder={mcpTransport === 'stdio' ? '输入启动命令' : '输入 MCP 接口地址'}
                   value={mcpEndpoint}
                   onChange={(event) => setMcpEndpoint(event.target.value)}
                 />
@@ -1956,12 +1814,11 @@ function ToolIntegrationControls({
               <button
                 className="dsh-redteam-dashboard__button"
                 type="submit"
-                disabled={busy || connecting || mcpName.trim() === '' || mcpEndpoint.trim() === ''}
+                disabled={busy || mcpName.trim() === '' || mcpEndpoint.trim() === ''}
               >
                 添加工具
               </button>
             </form>
-            {connectionError !== undefined && <p role="alert">{connectionError}</p>}
           </section>
         </div>
       </section>
@@ -2023,7 +1880,7 @@ function VulnerabilitySummaryModule({ state }: { readonly state: DashboardState 
               <small>{total === 0 ? '当前未发现漏洞' : '需要进一步处置'}</small>
               <p>
                 {total === 0
-                  ? '完成证据分析后，这里会汇总已识别漏洞。原生扫描请使用左侧安全工具中的内置扫描。'
+                  ? '完成漏洞扫描后，这里会汇总已识别漏洞。'
                   : `已载入 ${String(total)} 条漏洞，其中 ${String(highPriority)} 条为高优先级；详细证据按条目显示在下方。`}
               </p>
             </div>
@@ -2046,7 +1903,7 @@ function VulnerabilitySummaryModule({ state }: { readonly state: DashboardState 
           </div>
           {state.findings.length === 0 ? (
             <div className="dsh-redteam-dashboard__vulnerability-empty">
-              <IconWarningOutlineMedium size={22} />
+              <IconWarningOutline16 size={22} />
               <p className="dsh-redteam-dashboard__empty">暂无漏洞详情。</p>
             </div>
           ) : (
@@ -2075,28 +1932,20 @@ function VulnerabilitySummaryModule({ state }: { readonly state: DashboardState 
   )
 }
 
-export function Dashboard({
-  runtime,
-  useSessions,
-  activeModule,
-  onModuleChange,
-  showNavigation = true,
-  context,
-}: DashboardProps) {
-  const summary = useSessions(currentSession)
-  const sessionId = summary?.id
+export function Dashboard({ runtime, useSessions }: DashboardProps) {
+  const sessionId = useSessions((state) => state.current)
+  const summary = useSessions((state) =>
+    state.current === undefined ? undefined : state.byId[state.current],
+  )
   const active = isRedteamSession(summary)
   const conversation = useMemo(
     () => (sessionId === undefined ? undefined : runtime.conversation(sessionId)),
     [runtime, sessionId],
   )
-  const sessionToken = useMemo(() => ({}), [sessionId, active])
-  const currentToken = useRef(sessionToken)
-  currentToken.current = sessionToken
   const snapshot = useConversation(conversation)
   const state = useMemo(() => deriveDashboardState(snapshot), [snapshot])
-  const [localModule, setModule] = useState<ModuleId>('project')
-  const module = activeModule ?? localModule
+  const [module, setModule] = useState<ModuleId>('project')
+  const [open, setOpen] = useState(true)
   const [busy, setBusy] = useState(false)
   const [operationMode, setOperationMode] = useState<OperationMode>('passive')
   const [fullModeDialogOpen, setFullModeDialogOpen] = useState(false)
@@ -2107,21 +1956,20 @@ export function Dashboard({
   const [modelOptions, setModelOptions] = useState<readonly DashboardModelOption[]>([])
   const [policyBusy, setPolicyBusy] = useState(false)
   const [testingScope, setTestingScope] = useState<TestingScopeRule[]>([])
+  const [toolAvailability, setToolAvailability] = useState<Readonly<Record<string, boolean>>>({})
   const [notice, setNotice] = useState<{ error: boolean; text: string } | undefined>()
   const bodyRef = useRef<HTMLDivElement>(null)
 
   const showModule = (nextModule: ModuleId): void => {
     setModule(nextModule)
-    onModuleChange?.(nextModule)
     if (bodyRef.current !== null) bodyRef.current.scrollTop = 0
   }
-  useEffect(() => {
-    if (bodyRef.current) bodyRef.current.scrollTop = 0
-  }, [module])
 
   useEffect(() => {
-    setPolicyBusy(false)
-    setNotice(undefined)
+    if (active) setOpen(true)
+  }, [active, sessionId])
+
+  useEffect(() => {
     setEnabledToolIds([])
     setFullModeDialogOpen(false)
     setMcpTools([])
@@ -2129,7 +1977,25 @@ export function Dashboard({
     setModelOptions([])
     setOperationMode('passive')
     setTestingScope([])
+    setToolAvailability({})
   }, [sessionId])
+
+  useEffect(() => {
+    if (!active) return
+    let cancelled = false
+    void runtime
+      .toolAvailability()
+      .then((result) => {
+        if (cancelled || !result.ok) return
+        setToolAvailability(
+          Object.fromEntries(result.tools.map((tool) => [tool.id, tool.installed])),
+        )
+      })
+      .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
+  }, [active, runtime, sessionId])
 
   useEffect(() => {
     if (!active || sessionId === undefined) return
@@ -2159,31 +2025,6 @@ export function Dashboard({
       cancelled = true
     }
   }, [active, runtime, sessionId])
-
-  const permissionResultSeq = snapshot?.nodes
-    .filter((node) => node.kind === 'tool-result' && node.call?.name === 'redteam_mcp_permissions')
-    .at(-1)?.seq
-  useEffect(() => {
-    if (!active || sessionId === undefined) return
-    let cancelled = false
-    void runtime
-      .mcpConnections(sessionId)
-      .then(async (items) => {
-        if (!cancelled) setMcpTools(items.map(connectionChoice))
-        if (permissionResultSeq !== undefined) {
-          const result = await runtime.executionPolicy(sessionId)
-          if (!cancelled && result.ok && result.policy !== undefined)
-            setEnabledToolIds([...result.policy.enabledToolIds])
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled)
-          setNotice({ error: true, text: error instanceof Error ? error.message : String(error) })
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [active, runtime, sessionId, permissionResultSeq])
 
   useEffect(() => {
     if (!active || sessionId === undefined) return
@@ -2226,6 +2067,37 @@ export function Dashboard({
       cancelled = true
     }
   }, [active, runtime, sessionId])
+
+  useEffect(() => {
+    if (!active) return
+    const overlay = document.querySelector<HTMLElement>('[data-shell-overlay]')
+    const frame = overlay?.parentElement ?? null
+    const nativeSidebar = frame?.firstElementChild
+    const syncNativeSidebarWidth = (): void => {
+      if (!(nativeSidebar instanceof HTMLElement) || frame === null) return
+      const width = nativeSidebar.getBoundingClientRect().width
+      if (width > 0) frame.style.setProperty('--dsh-redteam-native-sidebar-width', `${width}px`)
+    }
+    document.body.dataset.dshRedteamDashboard = open ? 'fullscreen' : 'collapsed'
+    if (open) runtime.closeNativeDetails()
+    if (frame !== null) {
+      frame.dataset.dshRedteamSidebar = open ? 'fullscreen' : 'collapsed'
+    }
+    syncNativeSidebarWidth()
+    const observer =
+      nativeSidebar instanceof HTMLElement && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(syncNativeSidebarWidth)
+        : undefined
+    if (nativeSidebar instanceof HTMLElement) observer?.observe(nativeSidebar)
+    return () => {
+      delete document.body.dataset.dshRedteamDashboard
+      observer?.disconnect()
+      if (frame !== null) {
+        delete frame.dataset.dshRedteamSidebar
+        frame.style.removeProperty('--dsh-redteam-native-sidebar-width')
+      }
+    }
+  }, [active, open, runtime])
 
   const run = useCallback(
     (text: string) => {
@@ -2299,7 +2171,6 @@ export function Dashboard({
       void runtime
         .updateExecutionPolicy(sessionId, requested)
         .then((result) => {
-          if (currentToken.current !== sessionToken) return
           if (!result.ok) {
             setNotice({ error: true, text: result.error ?? '执行权限更新失败。' })
             return
@@ -2312,17 +2183,55 @@ export function Dashboard({
           afterSuccess?.()
         })
         .catch((error: unknown) => {
-          if (currentToken.current !== sessionToken) return
           setNotice({ error: true, text: error instanceof Error ? error.message : String(error) })
         })
-        .finally(() => {
-          if (currentToken.current === sessionToken) setPolicyBusy(false)
-        })
+        .finally(() => setPolicyBusy(false))
     },
-    [enabledToolIds, operationMode, policyBusy, runtime, sessionId, sessionToken, testingScope],
+    [enabledToolIds, operationMode, policyBusy, runtime, sessionId, testingScope],
   )
 
   if (!active) return null
+  if (!open) {
+    return (
+      <aside
+        className="dsh-redteam-dashboard__rail"
+        aria-label="棱镜快捷栏"
+        data-redteam-dashboard-rail
+      >
+        <div className="dsh-redteam-dashboard__rail-header">
+          <Tooltip label="全屏展开棱镜看板" side="right" delayMs={300}>
+            <button
+              className="dsh-redteam-dashboard__rail-mark"
+              type="button"
+              onClick={() => setOpen(true)}
+              aria-label="全屏展开棱镜看板"
+            >
+              <IconAgentPresetOutline16 size={20} />
+            </button>
+          </Tooltip>
+        </div>
+        <nav className="dsh-redteam-dashboard__rail-nav" aria-label="棱镜模块快捷入口">
+          {MODULES.map((item) => (
+            <Tooltip key={item.id} label={item.label} side="right" delayMs={300}>
+              <button
+                className="dsh-redteam-dashboard__rail-button"
+                type="button"
+                aria-label={item.label}
+                aria-current={module === item.id ? 'page' : undefined}
+                onClick={() => {
+                  setModule(item.id)
+                  setOpen(true)
+                }}
+              >
+                <ModuleIcon name={item.id} size={20} />
+              </button>
+            </Tooltip>
+          ))}
+        </nav>
+      </aside>
+    )
+  }
+
   return (
     <aside
       className="dsh-redteam-dashboard"
@@ -2332,7 +2241,7 @@ export function Dashboard({
     >
       <header className="dsh-redteam-dashboard__header">
         <span className="dsh-redteam-dashboard__mark">
-          <IconAgentPresetOutlineMedium size={19} />
+          <IconAgentPresetOutline16 size={19} />
         </span>
         <div className="dsh-redteam-dashboard__heading">
           <h2 className="dsh-redteam-dashboard__title">棱镜</h2>
@@ -2365,39 +2274,41 @@ export function Dashboard({
           </select>
         </label>
         <span aria-hidden="true" className="dsh-redteam-dashboard__header-spacer" />
+        <Tooltip label="收起为图标栏" side="bottom" delayMs={300}>
+          <button
+            className="dsh-redteam-dashboard__icon-button"
+            type="button"
+            onClick={() => setOpen(false)}
+            aria-label="收起为图标栏"
+          >
+            <IconPanelLeftOutline16 size={18} />
+          </button>
+        </Tooltip>
       </header>
-      {showNavigation && (
-        <nav
-          className="dsh-redteam-dashboard__tabs"
-          aria-label="棱镜模块"
-          role="tablist"
-          aria-orientation="horizontal"
-        >
-          {MODULES.map((item) => (
-            <button
-              key={item.id}
-              className="dsh-redteam-dashboard__tab"
-              type="button"
-              role="tab"
-              aria-selected={module === item.id}
-              onClick={() => showModule(item.id)}
-            >
-              <ModuleIcon name={item.id} />
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </nav>
-      )}
-      <div
-        ref={bodyRef}
-        className="dsh-redteam-dashboard__body"
-        role={showNavigation ? 'tabpanel' : 'region'}
-        aria-label={showNavigation ? undefined : MODULES.find((item) => item.id === module)?.label}
+      <nav
+        className="dsh-redteam-dashboard__tabs"
+        aria-label="棱镜模块"
+        role="tablist"
+        aria-orientation="horizontal"
       >
+        {MODULES.map((item) => (
+          <button
+            key={item.id}
+            className="dsh-redteam-dashboard__tab"
+            type="button"
+            role="tab"
+            aria-selected={module === item.id}
+            onClick={() => showModule(item.id)}
+          >
+            <ModuleIcon name={item.id} />
+            <span>{item.label}</span>
+          </button>
+        ))}
+      </nav>
+      <div ref={bodyRef} className="dsh-redteam-dashboard__body" role="tabpanel">
         {module === 'project' && (
           <ProjectModule
             busy={busy || policyBusy}
-            context={context}
             cwd={summary?.cwd}
             loadOlder={loadOlder}
             modelBusy={modelBusy}
@@ -2415,86 +2326,21 @@ export function Dashboard({
           />
         )}
         {module === 'discovery' && (
-          <>
-            <AssetOverviewModule
-              projectName={context?.name ?? state.project?.currentProjectName ?? '当前项目'}
-              state={state}
-              busy={busy || policyBusy}
-              run={run}
-              standalone={context?.project === false}
-            />
-          </>
+          <AssetOverviewModule
+            projectName={state.project?.currentProjectName ?? '当前项目'}
+            state={state}
+          />
         )}
-        {module === 'testing' && (
-          <>
-            <VulnerabilitySummaryModule state={state} />
-            <TestingScopePanel
-              busy={busy || policyBusy}
-              rules={testingScope}
-              setRules={(next) => updatePolicy({ testingScope: next }, '目标范围已确认并应用。')}
-              targets={assetTestTargets(state.assetMap).slice(0, TESTING_SCOPE_PREVIEW_LIMIT)}
-              totalTargetCount={Math.max(
-                assetTestTargets(state.assetMap).length,
-                state.assetMap?.nodeCount ?? 0,
-              )}
-            />
-            <div className="dsh-redteam-dashboard__project-action-grid">
-              <VulnerabilityAnalysisControls
-                busy={busy || policyBusy}
-                run={run}
-                assets={assetsInTestingScope(assetTestTargets(state.assetMap), testingScope)}
-                testingScope={testingScopeDescriptions(testingScope)}
-              />
-              <VulnerabilityValidationControls
-                busy={busy || policyBusy}
-                operationMode={operationMode}
-                run={run}
-                state={state}
-                testingScope={testingScopeDescriptions(testingScope)}
-              />
-            </div>
-            <ResultExportControls busy={busy || policyBusy} run={run} state={state} />
-          </>
-        )}
+        {module === 'testing' && <VulnerabilitySummaryModule state={state} />}
         {module === 'tools' && (
           <ToolIntegrationControls
-            key={sessionId}
             busy={policyBusy}
             enabledToolIds={enabledToolIds}
             mcpTools={mcpTools}
             setEnabledToolIds={(next) => updatePolicy({ enabledToolIds: next }, '可用工具已更新。')}
-            reviewMcp={async (connectionId) => {
-              if (sessionId === undefined) throw new Error('当前会话不可用。')
-              const result = await runtime.prompt(sessionId, mcpPermissionPrompt(connectionId))
-              if (!result.ok) throw new Error(result.error ?? 'AI 权限评估未能启动。')
-            }}
-            confirmMcp={async (connectionId, reviewId) => {
-              if (sessionId === undefined) throw new Error('当前会话不可用。')
-              const connection = await runtime.confirmMcpPermissions(
-                sessionId,
-                connectionId,
-                reviewId,
-              )
-              if (currentToken.current !== sessionToken) return
-              setMcpTools((items) =>
-                items.map((item) =>
-                  item.id === connection.id ? connectionChoice(connection) : item,
-                ),
-              )
-            }}
-            connectMcp={async (input) => {
-              if (sessionId === undefined) throw new Error('当前会话不可用。')
-              const connection = await runtime.connectMcp(sessionId, input)
-              if (currentToken.current !== sessionToken) return
-              setMcpTools((items) => [
-                ...items.filter((item) => item.id !== connection.id),
-                connectionChoice(connection),
-              ])
-              const result = await runtime.prompt(sessionId, mcpPermissionPrompt(connection.id))
-              if (!result.ok)
-                throw new Error(result.error ?? 'MCP 已连接，但 AI 评估未能启动，请重新评估。')
-            }}
+            setMcpTools={setMcpTools}
             snapshot={snapshot}
+            toolAvailability={toolAvailability}
           />
         )}
       </div>
@@ -2508,7 +2354,7 @@ export function Dashboard({
             role="dialog"
           >
             <span className="dsh-redteam-dashboard__risk-dialog-icon">
-              <IconWarningOutlineMedium size={22} />
+              <IconWarningOutline16 size={22} />
             </span>
             <h3 id="dsh-redteam-full-mode-title">启用全部允许模式？</h3>
             <p id="dsh-redteam-full-mode-description">

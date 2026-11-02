@@ -1,14 +1,7 @@
-import { z } from 'zod'
-import { SessionSettingsStore } from '../src/lib/session-settings.js'
-import { createServer } from 'node:http'
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
-import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import { realpathSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { ConnectionRpcHandler, ConnectionFetchRoute } from '@deepseek-ai/dsh-client-connection'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -16,7 +9,7 @@ import { ToolCallId as CallId } from '@deepseek-ai/dsh-llm'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import RedTeamPlugin from '../src/index.js'
 
 const signal = new AbortController().signal
@@ -71,7 +64,7 @@ async function addAgent(
   )
   Object.defineProperty(subject, 'ctx', { configurable: false, value: agentContext })
   presetByAgentContext.set(agentContext, agentPreset)
-  await ctx.agents.register(subject)
+  ctx.agents.register(subject)
   return subject
 }
 
@@ -79,7 +72,6 @@ async function setup(
   config: Record<string, unknown> = {},
   fixedWorkspace = true,
   agentPreset: string | undefined = 'redteam',
-  delayWebServer = false,
 ) {
   const workspaceRoot = await mkdtemp(join(tmpdir(), 'dsh-redteam-integration-'))
   temporaryDirectories.push(workspaceRoot)
@@ -91,312 +83,20 @@ async function setup(
   const ctx = new Context()
   contexts.push(ctx)
   await mountServices(ctx, workspaceRoot)
-  let handler: ConnectionRpcHandler | undefined
-  if (!delayWebServer) ctx.provide('webServer', {} as never)
-  const routes = new Map<string, ConnectionFetchRoute>()
-  const browserPeer = { principal: { kind: 'owner' } }
-  ctx.provide('connection', {
-    browserPeer,
-    fetch: {
-      register: (route: ConnectionFetchRoute) => {
-        routes.set(route.path, route)
-        handler = async (endpoint, payload, callSignal) => {
-          const selected = routes.get(`/api/redteam-policy/${endpoint}`)
-          if (selected === undefined)
-            return {
-              ok: false,
-              error: { code: 'internal', message: 'unknown endpoint', details: {} },
-            }
-          const request = new Request(`http://localhost${selected.path}`, {
-            method: 'POST',
-            signal: callSignal,
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-              type: 'client-request',
-              rpcId: 'test-request',
-              method: `redteam-policy/${endpoint}`,
-              payload,
-            }),
-          })
-          const response = await selected.fetch(request)
-          return (await response.json()).result
-        }
-        return async () => {
-          routes.delete(route.path)
-          if (routes.size === 0) handler = undefined
-        }
-      },
-    },
-  } as never)
-  const rpc = async (
-    endpoint: string,
-    payload: unknown,
-    callSignal = signal,
-    principal = { kind: 'owner' },
-  ) => {
-    if (handler === undefined) throw new Error('RPC not mounted')
-    browserPeer.principal = principal
-    return (await handler(
-      endpoint,
-      payload,
-      callSignal,
-      browserPeer as Parameters<ConnectionRpcHandler>[3],
-    )) as { ok: boolean; value?: unknown; error?: unknown }
-  }
   const fiber = await ctx.plugin(RedTeamPlugin, {
     ...(fixedWorkspace ? { workspaceRoot } : {}),
     ...config,
   })
-  if (delayWebServer) {
-    expect(handler).toBeUndefined()
-    ctx.provide('webServer', {} as never)
-    await vi.waitFor(() => expect(handler).toBeTypeOf('function'))
-  }
   const agent = await addAgent(ctx, workspaceRoot, agentPreset)
-  return { agent, ctx, fiber, workspaceRoot, rpc }
+  return { agent, ctx, fiber, workspaceRoot }
 }
 
 describe('single DeepSeek Harness plugin', () => {
-  it('waits for the HTTP server before mounting policy RPC routes', async () => {
-    const { agent, rpc } = await setup({}, true, 'redteam', true)
-    expect(await rpc('get', { sessionId: String(agent.id) })).toMatchObject({ ok: true })
-  })
-
-  it('persists confirmed policy across plugin reloads and keeps sessions isolated', async () => {
-    const { agent, ctx, fiber, workspaceRoot, rpc } = await setup()
-    const sessionId = String(agent.id)
-    const policy = {
-      enabledToolIds: ['nmap'],
-      operationMode: 'full',
-      testingScope: [
-        { targetId: 'ip', targetLabel: '127.0.0.1', targetType: 'ip', mode: 'all-ports' },
-      ],
-    }
-    expect(await rpc('update', { sessionId, policy })).toMatchObject({ ok: true, value: policy })
-    await fiber.dispose()
-    await ctx.plugin(RedTeamPlugin, { workspaceRoot })
-    expect(await rpc('get', { sessionId })).toMatchObject({ ok: true, value: policy })
-    const other = await addAgent(ctx, workspaceRoot)
-    expect(await rpc('get', { sessionId: String(other.id) })).toMatchObject({
-      ok: true,
-      value: { enabledToolIds: [], operationMode: 'passive' },
-    })
-    expect(await rpc('get', { sessionId: 'missing' })).toMatchObject({ ok: false })
-    expect(await rpc('get', {})).toMatchObject({ ok: false })
-    expect(await rpc('get', { sessionId }, signal, { kind: 'remote' })).toMatchObject({ ok: false })
-    expect(await rpc('unknown', { sessionId })).toMatchObject({ ok: false })
-    expect(await rpc('update', { sessionId, policy: {} })).toMatchObject({ ok: false })
-    expect(await rpc('get', { sessionId }, AbortSignal.abort())).toMatchObject({ ok: false })
-    expect(
-      await rpc('connect', {
-        sessionId,
-        connection: { label: 'invalid', transport: 'sse', endpoint: 'http://localhost/' },
-      }),
-    ).toMatchObject({ ok: false })
-  })
-
-  it('connects and discovers real MCP tools through DSH, restores connections, and denies unmapped execution', async () => {
-    const http = createServer((request, response) => {
-      const server = new McpServer({ name: 'fixture', version: '1.0.0' })
-      server.registerTool('ping', {}, async () => ({
-        content: [{ type: 'text' as const, text: 'pong' }],
-      }))
-      server.registerTool('probe', { inputSchema: { host: z.string() } }, async () => ({
-        content: [{ type: 'text' as const, text: 'fixture probe result' }],
-      }))
-      const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
-      response.on('close', () => {
-        void transport.close()
-        void server.close()
-      })
-      void (async () => {
-        await server.connect(transport as Transport)
-        const chunks: Buffer[] = []
-        for await (const chunk of request) chunks.push(Buffer.from(chunk))
-        const headers = new Headers()
-        for (const [key, value] of Object.entries(request.headers)) {
-          if (value !== undefined) headers.set(key, Array.isArray(value) ? value.join(',') : value)
-        }
-        const method = request.method ?? 'POST'
-        const body = Buffer.concat(chunks).toString('utf8')
-        const result = await transport.handleRequest(
-          new Request('http://localhost/mcp', {
-            headers,
-            method,
-            ...(body === '' ? {} : { body }),
-          }),
-        )
-        response.writeHead(result.status, Object.fromEntries(result.headers))
-        response.end(Buffer.from(await result.arrayBuffer()))
-      })().catch(() => {
-        response.writeHead(500).end()
-      })
-    })
-    await new Promise<void>((done) => http.listen(0, '127.0.0.1', done))
-    const address = http.address()
-    if (address === null || typeof address === 'string') throw new Error('missing TCP address')
-    const { agent, ctx, fiber, rpc, workspaceRoot } = await setup()
-    const sessionId = String(agent.id)
-    const connection = {
-      label: 'Fixture',
-      transport: 'http',
-      endpoint: `http://127.0.0.1:${address.port}/mcp`,
-    }
-    try {
-      const connected = await rpc('connect', { sessionId, connection })
-      expect(connected).toMatchObject({
-        ok: true,
-        value: {
-          connected: true,
-          executable: false,
-          label: 'Fixture',
-          tools: expect.arrayContaining([expect.stringMatching(/^mcp__rt-.*__ping$/u)]),
-        },
-      })
-      const value = connected.value as { id: string; tools: string[] }
-      const execution = await ctx.tools.execute({
-        agent,
-        name: value.tools.find((name) => name.endsWith('__ping'))!,
-        arguments: {},
-        callId: CallId('external-ping'),
-        signal,
-      })
-      expect(execution).toMatchObject({ isError: true })
-      const invoke = async (name: string, args: Record<string, unknown>) =>
-        await ctx.tools.execute({
-          agent,
-          name,
-          arguments: args,
-          callId: CallId(`permission-${name}`),
-          signal,
-        })
-      const inspected = await invoke('redteam_mcp_permissions', {
-        action: 'inspect',
-        connection_id: value.id,
-      })
-      expect(inspected.isError).toBe(false)
-      if (inspected.isError) throw new Error('inspect failed')
-      const catalog = JSON.parse(inspected.value as string) as {
-        catalogHash: string
-        tools: Array<{ name: string }>
-      }
-      const pingName = catalog.tools.find((tool) => tool.name.endsWith('__ping'))!.name
-      const probeName = catalog.tools.find((tool) => tool.name.endsWith('__probe'))!.name
-      const proposed = [
-        {
-          toolName: pingName,
-          mode: 'passive',
-          targetKind: 'none',
-          targetField: '',
-          reason: '本机离线状态查询',
-          confirmed: true,
-        },
-        {
-          toolName: probeName,
-          mode: 'active-scan',
-          targetKind: 'host',
-          targetField: 'host',
-          reason: '目标探测需要主动扫描权限',
-        },
-      ]
-      expect(
-        await invoke('redteam_mcp_permissions', {
-          action: 'propose',
-          connection_id: value.id,
-          catalog_hash: 'stale',
-          proposal_json: JSON.stringify(proposed),
-        }),
-      ).toMatchObject({ isError: true })
-      expect(
-        await invoke('redteam_mcp_permissions', {
-          action: 'propose',
-          connection_id: value.id,
-          catalog_hash: catalog.catalogHash,
-          proposal_json: JSON.stringify(proposed),
-        }),
-      ).toMatchObject({ isError: false })
-      expect(await invoke(pingName, {})).toMatchObject({ isError: true })
-      const views = await rpc('connections', { sessionId })
-      const view = (
-        views.value as Array<{ reviewId: string; permissions: Array<{ confirmed: boolean }> }>
-      )[0]!
-      expect(view.permissions.every((p) => !p.confirmed)).toBe(true)
-      expect(
-        await rpc('confirm-permissions', { sessionId, connectionId: value.id, reviewId: 'stale' }),
-      ).toMatchObject({ ok: false })
-      expect(
-        await rpc('confirm-permissions', {
-          sessionId,
-          connectionId: value.id,
-          reviewId: view.reviewId,
-        }),
-      ).toMatchObject({ ok: true, value: { executable: true } })
-      expect(await invoke(pingName, {})).toMatchObject({ isError: true })
-      expect(
-        await rpc('update', {
-          sessionId,
-          policy: {
-            enabledToolIds: [value.id],
-            operationMode: 'active-scan',
-            testingScope: [
-              {
-                mode: 'asset',
-                targetId: 'domain',
-                targetType: 'domain',
-                targetLabel: 'example.com',
-              },
-            ],
-          },
-        }),
-      ).toMatchObject({ ok: true })
-      expect(await invoke(pingName, {})).toMatchObject({ isError: false })
-      expect(await invoke(probeName, { host: 'outside.example' })).toMatchObject({ isError: true })
-      expect(await invoke(probeName, { host: 'example.com' })).toMatchObject({ isError: false })
-      expect(await rpc('connect', { sessionId, connection })).toMatchObject({ ok: true })
-      expect(await rpc('connections', { sessionId })).toMatchObject({
-        ok: true,
-        value: [{ label: 'Fixture', connected: true }],
-      })
-      await fiber.dispose()
-      await ctx.plugin(RedTeamPlugin, { workspaceRoot })
-      expect(await rpc('connections', { sessionId })).toMatchObject({
-        ok: true,
-        value: [{ label: 'Fixture', connected: true }],
-      })
-      expect(await invoke(probeName, { host: 'example.com' })).toMatchObject({ isError: false })
-      const store = new SessionSettingsStore(join(workspaceRoot, '.dsh-redteam'), sessionId)
-      const saved = await store.load()
-      await store.save({
-        ...saved,
-        mcpPermissions:
-          saved.mcpPermissions?.map((p) =>
-            p.toolName === probeName ? { ...p, schemaHash: '0'.repeat(64) } : p,
-          ) ?? [],
-      })
-      expect(await invoke(probeName, { host: 'example.com' })).toMatchObject({ isError: true })
-      expect(
-        await invoke('redteam_mcp_permissions', {
-          action: 'propose',
-          connection_id: value.id,
-          catalog_hash: catalog.catalogHash,
-          proposal_json: JSON.stringify(proposed),
-        }),
-      ).toMatchObject({ isError: false })
-      expect((await store.load()).policy.enabledToolIds).not.toContain(value.id)
-      expect(await invoke(pingName, {})).toMatchObject({ isError: true })
-    } finally {
-      await ctx.fiber.dispose()
-      http.closeAllConnections()
-      await new Promise<void>((done) => http.close(() => done()))
-    }
-  })
-
   it('registers core tools without requiring optional knowledge services', async () => {
     const { agent, ctx } = await setup()
     expect(ctx.tools.schemas()).toEqual([])
     expect(ctx.tools.schemas(agent).map((tool) => tool.name)).toEqual([
       'redteam_status',
-      'redteam_mcp_permissions',
       'redteam_knowledge_status',
       'redteam_project_start',
       'redteam_project_remember',
@@ -414,7 +114,6 @@ describe('single DeepSeek Harness plugin', () => {
       'redteam_scan',
       'redteam_findings',
       'redteam_update_finding',
-      'redteam_coverage',
       'redteam_report',
     ])
     const prompt = await ctx.systemPrompt.assemble({ agent, scope: agent })
@@ -597,7 +296,7 @@ describe('single DeepSeek Harness plugin', () => {
         mode: 'review',
         ruleCount: 9,
         rulesetVersion: '2026.08.1',
-        version: '1.4.0',
+        version: '1.3.2',
       },
     })
     const knowledgeStatus = await ctx.tools.execute({
@@ -668,58 +367,11 @@ describe('single DeepSeek Harness plugin', () => {
     const findingId = (findings.value as { findings: Array<{ id: string }> }).findings[0]?.id ?? ''
     expect(findingId).not.toBe('')
 
-    const coverageCall = (arguments_: Record<string, unknown>) =>
-      ctx.tools.execute({
-        agent,
-        arguments: arguments_,
-        callId: CallId('coverage'),
-        name: 'redteam_coverage',
-        signal,
-      })
-    const planned = await coverageCall({
-      action: 'record',
-      assessment_id: assessmentId,
-      surface: 'source configuration',
-      risk_area: 'secrets',
-      outcome: 'planned',
-    })
-    expect(planned.isError).toBe(false)
-    const reported = await coverageCall({
-      action: 'record',
-      surface: 'source configuration',
-      risk_area: 'secrets',
-      outcome: 'reported',
-      evidence: 'Reviewed password=example-secret-value.',
-      finding_ids: [findingId],
-    })
-    expect(reported.isError).toBe(false)
-    expect(JSON.stringify(reported)).not.toContain('example-secret-value')
-    const ledger = await coverageCall({ action: 'list' })
-    expect(ledger.isError).toBe(false)
-    if (!ledger.isError) expect(JSON.parse(ledger.value as string).entries).toHaveLength(1)
-    expect((await coverageCall({ action: 'record' })).isError).toBe(true)
-    expect(
-      (
-        await coverageCall({
-          action: 'record',
-          surface: 'other',
-          risk_area: 'secrets',
-          outcome: 'reported',
-          finding_ids: ['missing'],
-        })
-      ).isError,
-    ).toBe(true)
-
     const reviewed = await ctx.tools.execute({
       agent,
       arguments: {
         assessment_id: assessmentId,
         finding_id: findingId,
-        validation: {
-          method: 'code-review',
-          procedure: 'Trace source assignment.',
-          observation: 'Literal secret stored in tracked source.',
-        },
         reason: 'Reviewed password=example-secret-value against the source path.',
         status: 'confirmed',
       },
@@ -1196,7 +848,7 @@ describe('single DeepSeek Harness plugin', () => {
       ragflowUrl: 'http://127.0.0.1:9380',
       ragflowVulnerabilityDatasetId: 'vulnerabilities',
     })
-    expect(ctx.tools.schemas(agent)).toHaveLength(21)
+    expect(ctx.tools.schemas(agent)).toHaveLength(19)
     const prompt = await ctx.systemPrompt.assemble({ agent, scope: agent })
     expect(JSON.stringify(prompt)).not.toContain('GRAPHITI_AUTH_TOKEN')
     expect(JSON.stringify(prompt)).not.toContain('REDTEAM_RAGFLOW_API_KEY')
@@ -1208,7 +860,7 @@ describe('single DeepSeek Harness plugin', () => {
       graphitiUrl: 'https://graphiti.example.com/base',
       ragflowUrl: 'https://ragflow.example.com',
     })
-    expect(ctx.tools.schemas(agent)).toHaveLength(21)
+    expect(ctx.tools.schemas(agent)).toHaveLength(19)
   })
 
   it('enables each knowledge service independently', async () => {
@@ -1216,14 +868,14 @@ describe('single DeepSeek Harness plugin', () => {
     const graphitiTools = graphitiSetup.ctx.tools
       .schemas(graphitiSetup.agent)
       .map((tool) => tool.name)
-    expect(graphitiTools).toHaveLength(21)
+    expect(graphitiTools).toHaveLength(19)
     expect(graphitiTools).toContain('redteam_project_recall')
     expect(graphitiTools).toContain('redteam_knowledge_search')
     expect(graphitiTools).toContain('redteam_project_promote')
 
     const ragflowSetup = await setup({ ragflowUrl: 'http://127.0.0.1:9380' })
     const ragflowTools = ragflowSetup.ctx.tools.schemas(ragflowSetup.agent).map((tool) => tool.name)
-    expect(ragflowTools).toHaveLength(21)
+    expect(ragflowTools).toHaveLength(19)
     expect(ragflowTools).toContain('redteam_knowledge_search')
     expect(ragflowTools).toContain('redteam_project_start')
     expect(ragflowTools).toContain('redteam_project_promote')
@@ -1312,7 +964,7 @@ describe('single DeepSeek Harness plugin', () => {
     ).toBe(false)
 
     ctx.emit('agent-preset/selected', agent.id, 'redteam')
-    expect(ctx.tools.schemas(agent)).toHaveLength(21)
+    expect(ctx.tools.schemas(agent)).toHaveLength(19)
     ctx.emit('agent-preset/selected', agent.id, 'default')
     expect(ctx.tools.schemas(agent)).toEqual([])
   })

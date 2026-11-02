@@ -10,7 +10,7 @@ import type {
   ToolResultNode,
 } from '../../src/client/runtime-contract.js'
 import type { ReactNode } from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => {
@@ -18,14 +18,14 @@ vi.mock('@deepseek-ai/dsh-client-ui-primitives', () => {
   const Tooltip = ({ children }: { children: ReactNode }): ReactNode => children
   const MarkdownText = ({ text }: { text: string }): ReactNode => <div>{text}</div>
   return {
-    IconAgentPresetOutlineMedium: Icon,
-    IconCodeOutlineMedium: Icon,
-    IconListPenOutlineMedium: Icon,
-    IconPanelLeftOutlineMedium: Icon,
-    IconPlusOutlineMedium: Icon,
-    IconSearchOutlineMedium: Icon,
-    IconSendOutlineMedium: Icon,
-    IconWarningOutlineMedium: Icon,
+    IconAgentPresetOutline16: Icon,
+    IconCodeOutline16: Icon,
+    IconListPenOutline16: Icon,
+    IconPanelLeftOutline16: Icon,
+    IconPlusOutline16: Icon,
+    IconSearchOutline16: Icon,
+    IconSendOutline16: Icon,
+    IconWarningOutline16: Icon,
     MarkdownText,
     Tooltip,
   } as unknown as ToolResultNode
@@ -115,9 +115,6 @@ function session(snapshot: ConversationSnapshot, loadOlder: () => Promise<void>)
 function dashboardProps(
   snapshot: ConversationSnapshot,
   options: {
-    readonly confirmMcpPermissions?: DashboardRuntime['confirmMcpPermissions']
-    readonly mcpConnections?: DashboardRuntime['mcpConnections']
-    readonly connectMcp?: DashboardRuntime['connectMcp']
     readonly agentPreset?: string
     readonly createProjectSession?: DashboardRuntime['createProjectSession']
     readonly executionPolicy?: DashboardRuntime['executionPolicy']
@@ -127,6 +124,7 @@ function dashboardProps(
     readonly pickDirectory?: DashboardRuntime['pickDirectory']
     readonly prompt?: DashboardRuntime['prompt']
     readonly selectModel?: DashboardRuntime['selectModel']
+    readonly toolAvailability?: DashboardRuntime['toolAvailability']
     readonly updateExecutionPolicy?: DashboardRuntime['updateExecutionPolicy']
   } = {},
 ): { loadOlder: () => Promise<void>; props: DashboardProps; runtime: DashboardRuntime } {
@@ -138,32 +136,18 @@ function dashboardProps(
         cwd: '/authorized/project',
         displayTitle: 'Security review',
         id,
-        retainedBy: { mainView: 1 },
         projectionValues: { agentPreset: options.agentPreset ?? 'redteam' },
         running: false,
         updatedAt: 1,
       },
     },
+    current: id,
     ids: [id],
   } as unknown as SessionListState
   const loadOlder = options.loadOlder ?? vi.fn().mockResolvedValue(undefined)
   const face = session(snapshot, loadOlder)
   const runtime: DashboardRuntime = {
-    confirmMcpPermissions: options.confirmMcpPermissions ?? vi.fn(),
-    mcpConnections: options.mcpConnections ?? vi.fn().mockResolvedValue([]),
-    connectMcp:
-      options.connectMcp ??
-      vi.fn().mockImplementation((_sessionId, input) =>
-        Promise.resolve({
-          ...input,
-          id: 'mcp-test',
-          connected: true,
-          tools: ['mcp__extension__scan'],
-          executable: false,
-          permissions: [],
-          reviewId: 'review-empty',
-        }),
-      ),
+    closeNativeDetails: vi.fn(),
     createProjectSession: options.createProjectSession ?? vi.fn().mockResolvedValue({ ok: true }),
     executionPolicy:
       options.executionPolicy ??
@@ -198,6 +182,17 @@ function dashboardProps(
     selectModel: options.selectModel ?? vi.fn().mockResolvedValue({ ok: true }),
     conversation: () => face as unknown as DashboardConversationSource,
     loadOlder,
+    toolAvailability:
+      options.toolAvailability ??
+      vi.fn().mockResolvedValue({
+        ok: true,
+        tools: [
+          { id: 'nmap', installed: true },
+          { id: 'burp-suite', installed: true },
+          { id: 'metasploit', installed: true },
+          { id: 'nuclei', installed: true },
+        ],
+      }),
     updateExecutionPolicy:
       options.updateExecutionPolicy ??
       vi.fn().mockImplementation((_sessionId, policy) => Promise.resolve({ ok: true, policy })),
@@ -395,219 +390,31 @@ function manyAssetConversation(): ConversationSnapshot {
 }
 
 describe('Red Team dashboard', () => {
-  it('shows AI recommendations, requires confirmation, then permits explicit enablement', async () => {
-    const permission = {
-      connectionId: 'mcp-review',
-      toolName: 'mcp__rt-review__probe',
-      schemaHash: 'a'.repeat(64),
-      mode: 'active-scan' as const,
-      targetKind: 'host' as const,
-      targetField: 'host',
-      reason: '主动探测目标，需要扫描权限。',
-      confirmed: false,
-    }
-    const connection = {
-      id: 'mcp-review',
-      label: 'Review Tool',
-      endpoint: 'http://localhost/mcp',
-      transport: 'http' as const,
-      connected: true,
-      tools: [permission.toolName],
-      executable: false,
-      permissions: [permission],
-      reviewId: 'revision-1',
-    }
-    const confirmed = {
-      ...connection,
-      executable: true,
-      permissions: [{ ...permission, confirmed: true }],
-    }
+  it('shows a small warning below each built-in tool that is not installed', async () => {
     const { props, runtime } = dashboardProps(conversation(), {
-      mcpConnections: vi.fn().mockResolvedValue([connection]),
-      confirmMcpPermissions: vi.fn().mockResolvedValue(confirmed),
+      toolAvailability: vi.fn().mockResolvedValue({
+        ok: true,
+        tools: [
+          { id: 'nmap', installed: false },
+          { id: 'burp-suite', installed: true },
+          { id: 'metasploit', installed: false },
+          { id: 'nuclei', installed: false },
+        ],
+      }),
     })
     render(<Dashboard {...props} />)
+
+    await waitFor(() => expect(runtime.toolAvailability).toHaveBeenCalledTimes(1))
     fireEvent.click(screen.getByRole('tab', { name: '工具集成' }))
-    const checkbox = (await screen.findByRole('checkbox', {
-      name: /Review Tool/u,
-    })) as HTMLInputElement
-    expect(checkbox.disabled).toBe(true)
-    expect(screen.getByText('主动探测目标，需要扫描权限。', { exact: false })).toBeTruthy()
-    expect(screen.getByText(/目标参数：host/u)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: '确认 AI 权限建议' }))
-    await waitFor(() => expect(checkbox.disabled).toBe(false))
-    expect(runtime.confirmMcpPermissions).toHaveBeenCalledWith(
-      'session-1',
-      connection.id,
-      'revision-1',
-    )
-    expect(checkbox.checked).toBe(false)
-    fireEvent.click(checkbox)
-    fireEvent.click(screen.getByRole('button', { name: '确认选择' }))
-    await waitFor(() => expect(screen.getByText('已开启 1')).toBeTruthy())
-    fireEvent.click(screen.getByRole('button', { name: 'AI 重新评估权限' }))
-    await waitFor(() =>
-      expect(runtime.prompt).toHaveBeenCalledWith(
-        'session-1',
-        expect.stringContaining('redteam_mcp_permissions'),
-      ),
-    )
-  })
+    await waitFor(() => expect(screen.getAllByText('工具未安装')).toHaveLength(3))
 
-  it('retains the connection and offers retry if AI evaluation cannot be queued', async () => {
-    const { props, runtime } = dashboardProps(conversation(), {
-      prompt: vi.fn().mockResolvedValue({ ok: false, error: 'AI 暂不可用' }),
-    })
-    render(<Dashboard {...props} />)
-    fireEvent.click(screen.getByRole('tab', { name: '工具集成' }))
-    fireEvent.change(screen.getByRole('textbox', { name: '工具名称' }), {
-      target: { value: 'Review New' },
-    })
-    fireEvent.change(screen.getByRole('textbox', { name: '接口地址' }), {
-      target: { value: 'http://localhost/mcp' },
-    })
-    await waitFor(() =>
-      expect((screen.getByRole('button', { name: '添加工具' }) as HTMLButtonElement).disabled).toBe(
-        false,
-      ),
+    const nmap = screen.getByRole('checkbox', { name: /Nmap/u }).closest('label')
+    const burp = screen.getByRole('checkbox', { name: /Burp Suite/u }).closest('label')
+    if (nmap === null || burp === null) throw new Error('missing built-in tool choices')
+    expect(within(nmap).getByText('工具未安装').className).toContain(
+      'dsh-redteam-dashboard__tool-installation-warning',
     )
-    fireEvent.click(screen.getByRole('button', { name: '添加工具' }))
-    expect(await screen.findByRole('alert')).toHaveProperty('textContent', 'AI 暂不可用')
-    expect(screen.getByRole('checkbox', { name: /Review New/u })).toBeTruthy()
-    expect(runtime.prompt).toHaveBeenCalledWith(
-      'session-1',
-      expect.stringContaining('catalog_hash'),
-    )
-  })
-
-  it.each([false, true])(
-    'ignores a previous session policy response (failure=%s)',
-    async (fails) => {
-      let resolve!: (value: {
-        ok: boolean
-        policy: { enabledToolIds: string[]; operationMode: 'full'; testingScope: [] }
-      }) => void
-      let reject!: (error: Error) => void
-      const deferred = new Promise<{
-        ok: boolean
-        policy: { enabledToolIds: string[]; operationMode: 'full'; testingScope: [] }
-      }>((yes, no) => {
-        resolve = yes
-        reject = no
-      })
-      const { props, runtime } = dashboardProps(conversation(), {
-        updateExecutionPolicy: vi.fn().mockReturnValue(deferred),
-      })
-      let current = 'session-1'
-      const switched = {
-        ...props,
-        useSessions: (<T,>(selector: (state: SessionListState) => T) =>
-          selector({
-            byId: {
-              [current]: {
-                id: current,
-                retainedBy: { mainView: 1 },
-                projectionValues: { agentPreset: 'redteam' },
-              },
-            },
-          })) as DashboardProps['useSessions'],
-      }
-      const view = render(<Dashboard {...switched} />)
-      const mode = screen.getByRole('combobox', { name: '棱镜模式' }) as HTMLSelectElement
-      await waitFor(() => expect(mode.disabled).toBe(false))
-      fireEvent.change(mode, { target: { value: 'active-scan' } })
-      expect(runtime.updateExecutionPolicy).toHaveBeenCalledWith(
-        'session-1',
-        expect.objectContaining({ operationMode: 'active-scan' }),
-      )
-      current = 'session-2'
-      view.rerender(<Dashboard {...switched} />)
-      await waitFor(() => expect(mode.disabled).toBe(false))
-      await act(async () => {
-        if (fails) reject(new Error('old-session-failure'))
-        else
-          resolve({
-            ok: true,
-            policy: { enabledToolIds: ['nmap'], operationMode: 'full', testingScope: [] },
-          })
-        await Promise.resolve()
-      })
-      expect(mode.value).toBe('passive')
-      expect(screen.queryByText('old-session-failure')).toBeNull()
-      expect(screen.queryByText('可用工具已更新。')).toBeNull()
-      fireEvent.click(screen.getByRole('tab', { name: '工具集成' }))
-      expect(screen.getByText('已开启 0')).toBeTruthy()
-    },
-  )
-
-  it('reports a failed MCP connection without creating a successful card', async () => {
-    const { props } = dashboardProps(conversation(), {
-      connectMcp: vi.fn().mockRejectedValue(new Error('连接失败')),
-    })
-    render(<Dashboard {...props} />)
-    fireEvent.click(screen.getByRole('tab', { name: '工具集成' }))
-    fireEvent.change(screen.getByRole('textbox', { name: '工具名称' }), {
-      target: { value: 'Unavailable' },
-    })
-    fireEvent.change(screen.getByRole('textbox', { name: '接口地址' }), {
-      target: { value: 'http://localhost/mcp' },
-    })
-    await waitFor(() =>
-      expect((screen.getByRole('button', { name: '添加工具' }) as HTMLButtonElement).disabled).toBe(
-        false,
-      ),
-    )
-    fireEvent.click(screen.getByRole('button', { name: '添加工具' }))
-    expect(await screen.findByRole('alert')).toHaveProperty('textContent', '连接失败')
-    expect(screen.queryByRole('checkbox', { name: /Unavailable/u })).toBeNull()
-  })
-
-  it('supports independent modules and starts asset collection directly without a project', async () => {
-    const { props, runtime } = dashboardProps(conversation())
-    const view = render(
-      <Dashboard
-        {...props}
-        activeModule="discovery"
-        showNavigation={false}
-        context={{ name: '我的独立任务', project: false }}
-      />,
-    )
-    expect(screen.getByRole('heading', { name: '资产情况' })).toBeTruthy()
-    expect(screen.queryByRole('tablist')).toBeNull()
-    fireEvent.change(screen.getByLabelText('域名或 IP'), { target: { value: 'example.test' } })
-    await waitFor(() =>
-      expect((screen.getByRole('button', { name: '开始采集' }) as HTMLButtonElement).disabled).toBe(
-        false,
-      ),
-    )
-    fireEvent.click(screen.getByRole('button', { name: '开始采集' }))
-    await waitFor(() =>
-      expect(runtime.prompt).toHaveBeenCalledWith(
-        'session-1',
-        expect.stringContaining('example.test'),
-      ),
-    )
-    expect(runtime.createProjectSession).not.toHaveBeenCalled()
-    view.rerender(
-      <Dashboard
-        {...props}
-        activeModule="project"
-        showNavigation={false}
-        context={{ name: '我的独立任务', project: false }}
-      />,
-    )
-    expect(screen.getByRole('heading', { name: '任务工作台' })).toBeTruthy()
-    expect(screen.getByText('不关联项目')).toBeTruthy()
-    view.rerender(
-      <Dashboard
-        {...props}
-        activeModule="testing"
-        showNavigation={false}
-        context={{ name: '测试项目', project: true }}
-      />,
-    )
-    expect(screen.getByRole('heading', { name: '漏洞汇总' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: '分析已有证据' })).toBeTruthy()
+    expect(within(burp).queryByText('工具未安装')).toBeNull()
   })
 
   it('renders all modules and switches directly between full-screen and icon rail', async () => {
@@ -645,6 +452,7 @@ describe('Red Team dashboard', () => {
     expect(screen.queryByRole('tab', { name: '知识库' })).toBeNull()
     expect(screen.queryByRole('tab', { name: '横向攻击' })).toBeNull()
     expect(screen.queryByRole('tab', { name: '安全报告' })).toBeNull()
+    expect(document.body.dataset.dshRedteamDashboard).toBe('fullscreen')
     expect(screen.queryByRole('button', { name: '全屏展开' })).toBeNull()
     expect(screen.queryByRole('button', { name: '退出全屏' })).toBeNull()
 
@@ -674,7 +482,7 @@ describe('Red Team dashboard', () => {
       'dsh-redteam-dashboard__project-collection-grid',
     )
     expect(collectionCards[0]?.parentElement?.querySelectorAll(':scope > section')).toHaveLength(2)
-    const actionCards = ['已有证据分析', '漏洞验证'].map((name) =>
+    const actionCards = ['漏洞扫描', '漏洞验证'].map((name) =>
       within(projectBody).getByRole('heading', { name }).closest('section'),
     )
     expect(actionCards.every((card) => card !== null)).toBe(true)
@@ -686,7 +494,7 @@ describe('Red Team dashboard', () => {
         actionRow?.querySelectorAll(':scope > section') ?? [],
         (section) => section.querySelector('.dsh-redteam-dashboard__card-title')?.textContent,
       ),
-    ).toEqual(['已有证据分析', '漏洞验证'])
+    ).toEqual(['漏洞扫描', '漏洞验证'])
     const exportGroup = within(projectOverview).getByRole('group', { name: '结果导出' })
     expect(exportGroup).toBeTruthy()
     expect(exportGroup.closest('[data-project-panel="project-overview"]')).toBe(projectOverview)
@@ -719,7 +527,12 @@ describe('Red Team dashboard', () => {
     expect(screen.queryByText('授权范围')).toBeNull()
     expect(screen.queryByText('人工审核')).toBeNull()
 
-    expect(screen.queryByRole('button', { name: '收起为图标栏' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '收起为图标栏' }))
+    expect(document.body.dataset.dshRedteamDashboard).toBe('collapsed')
+    expect(screen.getByRole('button', { name: '全屏展开棱镜看板' })).toBeTruthy()
+    expect(screen.queryByRole('complementary', { name: '棱镜看板' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '全屏展开棱镜看板' }))
+    expect(document.body.dataset.dshRedteamDashboard).toBe('fullscreen')
 
     const reportType = screen.getByRole('combobox', { name: '报告类型' }) as HTMLSelectElement
     const reportFormat = screen.getByRole('combobox', { name: '导出格式' }) as HTMLSelectElement
@@ -741,7 +554,7 @@ describe('Red Team dashboard', () => {
     )
   })
 
-  it('runs collection and analysis and retains direct actions in the result modules', async () => {
+  it('runs collection and analysis from project status, then keeps result tabs read-only', async () => {
     const { props, runtime } = dashboardProps(populatedConversation(), {
       pickDirectory: vi.fn().mockResolvedValue('/authorized/review-source'),
     })
@@ -801,7 +614,7 @@ describe('Red Team dashboard', () => {
     expect(confirmScopeButton.disabled).toBe(false)
     expect(within(testingScope).getByRole('button', { name: '清空选择' })).toBeTruthy()
 
-    const analysis = screen.getByRole('heading', { name: '已有证据分析' }).closest('section')
+    const analysis = screen.getByRole('heading', { name: '漏洞扫描' }).closest('section')
     if (analysis === null) throw new Error('missing project action controls')
     expect(within(analysis).getAllByRole('button')).toHaveLength(1)
     expect(within(analysis).queryByText('开源组件')).toBeNull()
@@ -811,7 +624,7 @@ describe('Red Team dashboard', () => {
     fireEvent.click(confirmScopeButton)
     await waitFor(() => expect(within(analysis).getAllByRole('checkbox').length).toBeGreaterThan(0))
     expect(within(analysis).queryByRole('combobox', { name: '分析目标' })).toBeNull()
-    const analysisTypes = within(analysis).getByRole('group', { name: '证据分析类型' })
+    const analysisTypes = within(analysis).getByRole('group', { name: '漏洞扫描类型' })
     expect(
       within(analysisTypes)
         .getAllByRole('checkbox')
@@ -826,7 +639,7 @@ describe('Red Team dashboard', () => {
       '网络服务暴露',
     ])
     const analysisButton = within(analysis).getByRole('button', {
-      name: '分析已有证据',
+      name: '开始扫描',
     }) as HTMLButtonElement
     expect(analysisButton.disabled).toBe(true)
     fireEvent.click(within(analysisTypes).getByRole('checkbox', { name: '注入与执行' }))
@@ -926,23 +739,23 @@ describe('Red Team dashboard', () => {
     }) as HTMLSelectElement
     expect(Array.from(mcpTransport.options, (option) => option.textContent)).toEqual([
       'HTTP',
+      'SSE',
       'STDIO',
     ])
-    fireEvent.change(mcpTransport, { target: { value: 'http' } })
+    fireEvent.change(mcpTransport, { target: { value: 'sse' } })
     fireEvent.click(addMcpTool)
     expect(within(toolIntegration).getByText('已开启 1')).toBeTruthy()
-    const customTool = (await within(toolIntegration).findByRole('checkbox', {
+    const customTool = within(toolIntegration).getByRole('checkbox', {
       name: /custom-passive-audit.*MCP/u,
-    })) as HTMLInputElement
+    }) as HTMLInputElement
     expect(customTool.checked).toBe(false)
-    expect(within(toolIntegration).getByText('MCP · HTTP')).toBeTruthy()
+    expect(within(toolIntegration).getByText('MCP · SSE')).toBeTruthy()
     expect(within(toolIntegration).getByText('http://127.0.0.1:7777/mcp')).toBeTruthy()
-    expect(customTool.disabled).toBe(true)
-    expect(
-      within(toolIntegration).getByText(
-        '已连接 · 1 个工具；等待 AI 权限建议或用户确认，执行已禁用',
-      ),
-    ).toBeTruthy()
+    fireEvent.click(customTool)
+    expect(within(toolIntegration).getByText('已选择 2 个工具')).toBeTruthy()
+    fireEvent.click(confirmToolSelection)
+    await waitFor(() => expect(within(toolIntegration).getByText('已开启 2')).toBeTruthy())
+    expect(customTool.checked).toBe(true)
     expect(
       Array.from(screen.getAllByLabelText(/执行详情/u), (section) =>
         section.getAttribute('data-tool-section'),
@@ -971,9 +784,9 @@ describe('Red Team dashboard', () => {
     expect(screen.getAllByText('OWASP Juice Shop').length).toBeGreaterThan(0)
     expect(screen.getAllByText('React 18').length).toBeGreaterThan(0)
     expect(screen.getAllByText('6 个资产')).toHaveLength(2)
-    expect(screen.getByRole('textbox', { name: '域名或 IP' })).toBeTruthy()
-    expect(screen.getAllByRole('checkbox')).toHaveLength(4)
-    expect(screen.getByRole('button', { name: /开始采集/u })).toBeTruthy()
+    expect(screen.queryByRole('textbox', { name: '域名或 IP' })).toBeNull()
+    expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.queryByRole('button', { name: /开始采集/u })).toBeNull()
 
     const graph = screen.getByRole('img', { name: '资产详情' })
     expect(graph.querySelector('[data-status="vulnerable"]')).toBeTruthy()
@@ -1016,11 +829,9 @@ describe('Red Team dashboard', () => {
     ).not.toBe(0)
     expect(screen.getByText('Command injection candidate')).toBeTruthy()
     expect(screen.getByText('src/server.ts:42')).toBeTruthy()
-    expect(screen.getAllByRole('checkbox').length).toBeGreaterThan(0)
+    expect(screen.queryByRole('checkbox')).toBeNull()
     expect(screen.queryByRole('button', { name: '开始审计' })).toBeNull()
-    expect(
-      (screen.getByRole('button', { name: '分析已有证据' }) as HTMLButtonElement).disabled,
-    ).toBe(true)
+    expect(screen.queryByRole('button', { name: '开始扫描' })).toBeNull()
     expect(screen.queryByRole('textbox', { name: '审计目录' })).toBeNull()
     expect(screen.queryByRole('combobox', { name: '分析目标' })).toBeNull()
   })
@@ -1049,11 +860,11 @@ describe('Red Team dashboard', () => {
     )
     fireEvent.click(within(testingScope).getByRole('button', { name: '确认范围' }))
 
-    const analysis = screen.getByRole('heading', { name: '已有证据分析' }).closest('section')
+    const analysis = screen.getByRole('heading', { name: '漏洞扫描' }).closest('section')
     if (analysis === null) throw new Error('missing vulnerability analysis')
     await waitFor(() => expect(within(analysis).getByText('1 个资产 · 5 类')).toBeTruthy())
     expect(
-      within(within(analysis).getByRole('group', { name: '证据分析类型' }))
+      within(within(analysis).getByRole('group', { name: '漏洞扫描类型' }))
         .getAllByRole('checkbox')
         .map((checkbox) => checkbox.parentElement?.querySelector('strong')?.textContent),
     ).toEqual(['未授权访问', '弱口令与鉴权', '危险配置', '数据暴露', '命令执行'])
@@ -1071,12 +882,12 @@ describe('Red Team dashboard', () => {
     expect(screen.getByText('完成信息收集后选择授权目标。')).toBeTruthy()
     expect(screen.queryByRole('combobox', { name: '分析目标' })).toBeNull()
     expect(
-      within(screen.getByRole('group', { name: '证据分析类型' })).queryAllByRole('checkbox'),
+      within(screen.getByRole('group', { name: '漏洞扫描类型' })).queryAllByRole('checkbox'),
     ).toHaveLength(0)
     expect(screen.getByText('待确认范围')).toBeTruthy()
-    expect(
-      (screen.getByRole('button', { name: '分析已有证据' }) as HTMLButtonElement).disabled,
-    ).toBe(true)
+    expect((screen.getByRole('button', { name: '开始扫描' }) as HTMLButtonElement).disabled).toBe(
+      true,
+    )
     expect(screen.queryByRole('group', { name: '漏洞验证类型' })).toBeNull()
     expect(screen.queryByRole('combobox', { name: '漏洞选择' })).toBeNull()
     expect(screen.getByText('暂无可验证漏洞')).toBeTruthy()
@@ -1120,14 +931,10 @@ describe('Red Team dashboard', () => {
     expect(screen.getByRole('heading', { name: '漏洞详情' })).toBeTruthy()
     expect(screen.getByText('暂无漏洞详情。')).toBeTruthy()
     expect(
-      within(emptyVulnerabilityOverview).getByText(
-        '完成证据分析后，这里会汇总已识别漏洞。原生扫描请使用左侧安全工具中的内置扫描。',
-      ),
+      within(emptyVulnerabilityOverview).getByText('完成漏洞扫描后，这里会汇总已识别漏洞。'),
     ).toBeTruthy()
     expect(screen.queryByRole('button', { name: '开始审计' })).toBeNull()
-    expect(
-      (screen.getByRole('button', { name: '分析已有证据' }) as HTMLButtonElement).disabled,
-    ).toBe(true)
+    expect(screen.queryByRole('button', { name: '开始扫描' })).toBeNull()
   })
 
   it('keeps project session management and hidden knowledge details out of the dashboard', () => {
@@ -1229,6 +1036,49 @@ describe('Red Team dashboard', () => {
     await waitFor(() =>
       expect(runtime.prompt).toHaveBeenCalledWith(expect.any(String), '继续检查登录流程'),
     )
+  })
+
+  it('offers only a full-screen dashboard and the reduced collapsed rail', () => {
+    const frame = document.createElement('div')
+    const nativeSidebar = document.createElement('div')
+    const center = document.createElement('div')
+    const details = document.createElement('div')
+    const overlay = document.createElement('div')
+    overlay.dataset.shellOverlay = ''
+    frame.append(nativeSidebar, center, details, overlay)
+    document.body.append(frame)
+    vi.spyOn(nativeSidebar, 'getBoundingClientRect').mockReturnValue({
+      bottom: 0,
+      height: 0,
+      left: 0,
+      right: 248,
+      toJSON: () => ({}),
+      top: 0,
+      width: 248,
+      x: 0,
+      y: 0,
+    })
+
+    const { props } = dashboardProps(conversation())
+    const view = render(<Dashboard {...props} />, { container: overlay })
+    expect(frame.dataset.dshRedteamSidebar).toBe('fullscreen')
+    expect(frame.style.getPropertyValue('--dsh-redteam-native-sidebar-width')).toBe('248px')
+    fireEvent.click(screen.getByRole('button', { name: '收起为图标栏' }))
+    expect(frame.dataset.dshRedteamSidebar).toBe('collapsed')
+    expect(screen.getByRole('button', { name: '全屏展开棱镜看板' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '项目状态' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '资产情况' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '漏洞汇总' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '工具集成' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: '权限维持' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '知识库' })).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: '资产情况' }))
+    expect(frame.dataset.dshRedteamSidebar).toBe('fullscreen')
+    expect(screen.getByRole('tab', { name: '资产情况' }).getAttribute('aria-selected')).toBe('true')
+    view.unmount()
+    expect(frame.dataset.dshRedteamSidebar).toBeUndefined()
+    expect(frame.style.getPropertyValue('--dsh-redteam-native-sidebar-width')).toBe('')
+    frame.remove()
   })
 
   it('renders nothing outside Red Team mode', () => {

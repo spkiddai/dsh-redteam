@@ -4,135 +4,153 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { parse } from 'yaml'
+import { scanRoot } from '@deepseek-ai/dsh-agent-presets'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { activateProfile, main, parseArguments } from '../src/cli.js'
+import { activateProfile, installPreset, main, parseArguments, parseHome } from '../src/cli.js'
 
 const temporaryDirectories: string[] = []
 const executeFile = promisify(execFile)
 
 afterEach(async () => {
   vi.restoreAllMocks()
-  vi.unstubAllEnvs()
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true })))
 })
 
-async function temporaryDirectory(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), 'dsh-redteam-installer-'))
+async function temporaryDirectory(prefix: string): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), prefix))
   temporaryDirectories.push(directory)
   return directory
 }
 
-async function profilePatch(source = '[]\n') {
-  const home = await temporaryDirectory()
-  const directory = join(home, 'profiles', 'web')
-  await mkdir(directory, { recursive: true, mode: 0o700 })
-  const target = join(directory, 'cordis.patch.yml')
-  await writeFile(target, source, { mode: 0o600 })
-  return { home, target }
+async function fixturePreset(): Promise<string> {
+  const source = await temporaryDirectory('dsh-redteam-preset-source-')
+  await writeFile(join(source, 'agent.cordis.yml'), '- id: dsh-redteam\n')
+  await writeFile(join(source, 'preset.yml'), 'name: 红队模式\n')
+  return source
 }
 
-describe('DSH 0.2.1 Red Team installer', () => {
-  it('accepts only the current installer command and safe profile names', () => {
-    expect(parseArguments(['install', '--home', './fixture-home']).home).toContain('fixture-home')
+describe('Red Team mode installer', () => {
+  it('parses explicit and environment-backed DSH homes', () => {
+    expect(parseHome(['install-preset', '--home', './fixture-home'])).toContain('fixture-home')
     vi.stubEnv('DSH_HOME', './environment-home')
-    expect(parseArguments(['install']).home).toContain('environment-home')
-    expect(parseArguments(['install', '--profile', 'headless']).profile).toBe('headless')
-    for (const args of [
-      [],
-      ['install-preset'],
-      ['install', '--unknown'],
-      ['install', '--home', '--profile'],
-      ['install', '--unknown', 'value'],
-    ]) {
-      expect(() => parseArguments(args)).toThrow('Usage:')
-    }
+    expect(parseHome(['install-preset'])).toContain('environment-home')
+    expect(() => parseHome([])).toThrow('Usage: dsh-redteam install')
+    expect(() => parseHome(['install-preset', '--unknown'])).toThrow('Usage:')
+    expect(parseArguments(['install', '--profile', 'headless'])).toMatchObject({
+      command: 'install',
+      profile: 'headless',
+    })
     expect(() => parseArguments(['install', '--profile', '../web'])).toThrow('profile name')
   })
 
-  it('installs one host plugin and a declarative preset, keeping unrelated YAML unchanged', async () => {
-    const original =
-      '# user configuration\n- id: existing\n  config:\n    enabled: !!js process.platform !== "win32"\n'
-    const { home, target } = await profilePatch(original)
-    expect((await activateProfile(home)).state).toBe('activated')
-    const content = await readFile(target, 'utf8')
-    expect(content.startsWith(original)).toBe(true)
-    const rows = parse(content, {
-      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
-    })[1].insert
-    expect(rows.map((row: { id: string }) => row.id)).toEqual(['dsh-redteam', 'preset-redteam'])
-    expect(rows[1]).toMatchObject({
-      name: '@deepseek-ai/dsh-agent-preset',
-      config: { id: 'redteam', name: '红队模式', order: 5 },
-    })
-    const plugins = rows[1].config.plugins
-    expect(plugins.find((row: { id: string }) => row.id === 'persona').config.prefix).toContain(
-      'authorized',
+  it('installs the preset with private permissions and is idempotent', async () => {
+    const home = await temporaryDirectory('dsh-redteam-home-')
+    const source = await fixturePreset()
+    const installed = await installPreset(home, source)
+    expect(installed.state).toBe('installed')
+    expect(await readFile(join(installed.target, 'preset.yml'), 'utf8')).toContain('红队模式')
+    if (process.platform !== 'win32') {
+      expect((await stat(installed.target)).mode & 0o777).toBe(0o700)
+      expect((await stat(join(installed.target, 'preset.yml'))).mode & 0o777).toBe(0o600)
+    }
+    expect((await installPreset(home, source)).state).toBe('already-installed')
+  })
+
+  it('renders the installed MCP server path without embedding a checkout-relative path', async () => {
+    const home = await temporaryDirectory('dsh-redteam-mcp-preset-home-')
+    const source = await fixturePreset()
+    const mcpServerPath = '/Applications/Prism Tools/redteam-mcp.js'
+    await writeFile(
+      join(source, 'agent.cordis.yml'),
+      '- id: local-tools\n  config:\n    args:\n      - __DSH_REDTEAM_MCP_SERVER__\n',
     )
-    expect(plugins.find((row: { id: string }) => row.id === 'tool-web').config.fetch).toBe(false)
-    expect(content).toContain('@deepseek-ai/dsh-workflow-ptc')
-    expect(content).not.toContain('__DSH_REDTEAM_MCP_SERVER__')
-    expect((await activateProfile(home)).state).toBe('already-active')
-    expect(await readFile(target, 'utf8')).toBe(content)
-    if (process.platform !== 'win32') expect((await stat(target)).mode & 0o777).toBe(0o600)
+    const installed = await installPreset(home, source, mcpServerPath)
+    const config = await readFile(join(installed.target, 'agent.cordis.yml'), 'utf8')
+    expect(config).toContain(JSON.stringify(mcpServerPath))
+    expect(config).not.toContain('__DSH_REDTEAM_MCP_SERVER__')
+    expect((await installPreset(home, source, mcpServerPath)).state).toBe('already-installed')
   })
 
-  it('renders a quoted MCP path with spaces and preserves empty-profile comments', async () => {
-    const { home, target } = await profilePatch('# keep\n[]\n')
-    const mcp = '/Applications/Prism "Tools"/server.js'
-    await activateProfile(home, 'web', undefined, mcp)
-    const content = await readFile(target, 'utf8')
-    expect(content).toContain('# keep')
-    expect(content).toContain(JSON.stringify(mcp))
-    expect((await activateProfile(home, 'web', undefined, mcp)).state).toBe('already-active')
+  it('refuses to overwrite a changed preset', async () => {
+    const home = await temporaryDirectory('dsh-redteam-home-')
+    const source = await fixturePreset()
+    const target = join(home, '.agent-presets', 'redteam')
+    await mkdir(target, { recursive: true })
+    await writeFile(join(target, 'agent.cordis.yml'), 'user-owned: true\n')
+    await writeFile(join(target, 'preset.yml'), 'name: 用户配置\n')
+    await expect(installPreset(home, source)).rejects.toThrow('refusing to overwrite')
   })
 
-  it.each(['', '# empty\n'])('accepts an empty patch (%j)', async (source) => {
-    const { home, target } = await profilePatch(source)
-    await activateProfile(home)
-    expect(await readFile(target, 'utf8')).toContain('id: preset-redteam')
-  })
-
-  it.each([
-    '- insert:\n    - id: dsh-redteam\n      name: another-package\n',
-    '- insert:\n    - id: preset-redteam\n      name: user-preset\n',
-    'invalid: [',
-    'userOwned: true\n',
-  ])('refuses conflicting or malformed patches without changing them', async (source) => {
-    const { home, target } = await profilePatch(source)
-    await expect(activateProfile(home)).rejects.toThrow('refusing')
-    expect(await readFile(target, 'utf8')).toBe(source)
-  })
-
-  it('refuses an edited managed preset or an uninitialized profile', async () => {
-    const { home, target } = await profilePatch()
-    await activateProfile(home)
-    const edited = (await readFile(target, 'utf8')).replace('order: 5', 'order: 8')
-    await writeFile(target, edited)
-    await expect(activateProfile(home)).rejects.toThrow('refusing to overwrite')
-    expect(await readFile(target, 'utf8')).toBe(edited)
-    await expect(activateProfile(home, 'missing')).rejects.toThrow('not initialized')
-    await expect(activateProfile(home, '../web')).rejects.toThrow('profile name')
-  })
-
-  it('rejects an invalid packaged template before modifying the profile', async () => {
-    const { home, target } = await profilePatch()
-    const template = join(home, 'template.yml')
-    await writeFile(template, '- insert: []\n')
-    await expect(activateProfile(home, 'web', template)).rejects.toThrow('exactly one')
-    expect(await readFile(target, 'utf8')).toBe('[]\n')
-  })
-
-  it('reports installation through the command and package-manager symlink', async () => {
-    const { home, target } = await profilePatch()
+  it('reports the command result without exposing preset contents', async () => {
+    const home = await temporaryDirectory('dsh-redteam-home-')
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined)
-    await main(['install', '--home', home])
-    expect(output).toHaveBeenCalledWith(expect.stringContaining('Red Team mode activated'))
-    const executable = join(home, 'dsh-redteam')
+    vi.stubEnv('DSH_HOME', home)
+    await main(['install-preset'])
+    expect(output).toHaveBeenCalledWith(expect.stringContaining('Red Team mode installed'))
+  })
+
+  it('installs a healthy preset recognized by the DSH roster', async () => {
+    const home = await temporaryDirectory('dsh-redteam-real-preset-home-')
+    await installPreset(home)
+    const presets = await scanRoot(
+      { path: join(home, '.agent-presets'), trust: 'user' },
+      new URL('.', import.meta.resolve('@deepseek-ai/dsh/package.json')).href,
+    )
+    expect(presets).toEqual([
+      expect.objectContaining({
+        description: expect.stringContaining('资产测绘'),
+        id: 'redteam',
+        name: '红队模式',
+        order: 5,
+      }),
+    ])
+    expect(presets[0]?.broken).toBeUndefined()
+  })
+
+  it('activates one host row without changing existing profile content', async () => {
+    const home = await temporaryDirectory('dsh-redteam-profile-home-')
+    const profile = join(home, 'profiles', 'web')
+    await mkdir(profile, { recursive: true })
+    await writeFile(
+      join(profile, 'cordis.patch.yml'),
+      '# user-owned settings\n- id: existing\n  config:\n    enabled: true\n',
+    )
+    const result = await activateProfile(home)
+    expect(result.state).toBe('activated')
+    const content = await readFile(result.target, 'utf8')
+    expect(content).toContain('# user-owned settings')
+    expect(content).toContain('id: existing')
+    expect(content).toContain("name: '@prism-ai/dsh-redteam'")
+    expect((await activateProfile(home)).state).toBe('already-active')
+  })
+
+  it('replaces only an empty profile patch and refuses a conflicting row', async () => {
+    const home = await temporaryDirectory('dsh-redteam-empty-profile-home-')
+    const profile = join(home, 'profiles', 'web')
+    await mkdir(profile, { recursive: true })
+    const patch = join(profile, 'cordis.patch.yml')
+    await writeFile(patch, '# keep this comment\n[]\n')
+    await activateProfile(home)
+    expect(await readFile(patch, 'utf8')).toContain('# keep this comment')
+    await writeFile(patch, '- insert:\n    - id: dsh-redteam\n      name: another-package\n')
+    await expect(activateProfile(home)).rejects.toThrow('different dsh-redteam row')
+  })
+
+  it('runs through the executable symlink created by a package manager', async () => {
+    const home = await temporaryDirectory('dsh-redteam-bin-home-')
+    const binDirectory = await temporaryDirectory('dsh-redteam-bin-')
     const source = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'cli.ts')
+    const executable = join(binDirectory, 'dsh-redteam')
     await symlink(source, executable)
-    const { stdout } = await executeFile(process.execPath, [executable, 'install', '--home', home])
-    expect(stdout).toContain('is already active')
-    expect(await readFile(target, 'utf8')).toContain('红队模式')
+    const { stdout } = await executeFile(process.execPath, [
+      executable,
+      'install-preset',
+      '--home',
+      home,
+    ])
+    expect(stdout).toContain('Red Team mode installed')
+    expect(await readFile(join(home, '.agent-presets', 'redteam', 'preset.yml'), 'utf8')).toContain(
+      '红队模式',
+    )
   })
 })

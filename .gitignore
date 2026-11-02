@@ -1,7 +1,10 @@
 node_modules/
 dist/
 coverage/
+release/
 *.tgz
+*.zip
+*.sha256
 .DS_Store
 .env
 .env.*
@@ -9,6 +12,3 @@ coverage/
 .dsh-redteam/
 .prism/
 .dsh/
-prism-auth/
-
-.prism-app/

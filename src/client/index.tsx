@@ -1,50 +1,134 @@
-import { PrismShell, type ShellNavigation } from './PrismShell.js'
-import type { McpPermission } from '../lib/mcp-permission-types.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
-import type {} from '@deepseek-ai/dsh-client-ui-session/client'
-import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
-import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
-import type {} from '@deepseek-ai/dsh-api-remotes/client'
-import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
-import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
-import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
-import type {} from '@deepseek-ai/dsh-client-ui-sidebar/client'
-import type { SessionFace, SessionSnapshot } from '@deepseek-ai/dsh-api-session-controller/client'
-import type { ChatSnapshot } from '@deepseek-ai/dsh-client-ui-chat/client'
 import {
+  Dashboard,
+  type DashboardProps,
   type DashboardExecutionPolicy,
   type DashboardModelSelection,
   type DashboardRuntime,
+  type DashboardToolAvailability,
   type OperationMode,
-  type McpConnection,
   type TestingScopeRule,
 } from './Dashboard.js'
 import type {
   DashboardConversationSnapshot,
   DashboardConversationSource,
+  ObservableSnapshot,
+  SessionFaceLike,
   SessionId,
+  SessionListStateLike,
 } from './runtime-contract.js'
 import { projectLoadPrompt, projectStartPrompt } from './prompts.js'
 import { DASHBOARD_STYLES } from './styles.js'
-
-declare module '@deepseek-ai/dsh-api-session-controller/client' {
-  interface SessionReferenceSourceMap {
-    redteamDashboard: unknown
-  }
-}
 
 export const inject = [
   'slots',
   'sessions',
   'workspaces',
+  'layout',
   'connection',
   'remote',
+  'remote.agentPresets',
   'remote.session',
   'uiConversation',
   'uiWorkspace',
 ]
+
+type RemoteResult<Value> =
+  | { readonly ok: true; readonly value: Value }
+  | { readonly error: { readonly message: string }; readonly ok: false }
+
+interface SessionBindingLike {
+  readonly session: SessionFaceLike
+  readonly sessionId?: SessionId
+}
+
+interface SessionsLike {
+  readonly list?: ObservableSnapshot<SessionListStateLike>
+  binding(sessionId: SessionId): SessionBindingLike | undefined
+  create(input: { readonly workspaceId: string }): Promise<SessionId>
+  open(sessionId: SessionId): void
+}
+
+interface WorkspacesLike {
+  create(input: { readonly path: string }): Promise<{ readonly workspaceId: string }>
+}
+
+interface LatestChatTarget {
+  getSnapshot(): unknown
+  subscribe(listener: () => void): () => void
+}
+
+interface LatestUiConversation {
+  binding(binding: SessionBindingLike): {
+    target(name: 'chat'): LatestChatTarget
+  }
+}
+
+interface LatestRemote {
+  readonly agentPresets: {
+    select(sessionId: SessionId, agentPreset: string): Promise<RemoteResult<string>>
+  }
+  readonly session: {
+    modelCatalog(): Promise<
+      RemoteResult<{
+        readonly default: DashboardModelSelection
+        readonly groups: readonly {
+          readonly id: string
+          readonly models: readonly { readonly id: string; readonly name: string }[]
+          readonly name: string
+        }[]
+        readonly routableProviders: readonly string[]
+      }>
+    >
+    selectModel(payload: {
+      readonly model: string
+      readonly provider: string
+      readonly sessionId: SessionId
+    }): Promise<RemoteResult<{ readonly selected: DashboardModelSelection }>>
+  }
+}
+
+interface SlotsLike {
+  inject(name: string, callback: () => unknown): unknown
+  register(definition: Readonly<Record<string, unknown>>, component: unknown): () => void
+}
+
+type RedteamClientContext = Omit<
+  Context,
+  | 'connection'
+  | 'layout'
+  | 'remote'
+  | 'sessions'
+  | 'slots'
+  | 'uiConversation'
+  | 'uiWorkspace'
+  | 'workspaces'
+> & {
+  readonly connection: RedteamConnection
+  readonly layout: { closeDetails(): void }
+  readonly remote: LatestRemote
+  readonly sessions: SessionsLike
+  readonly slots: SlotsLike
+  readonly uiConversation: LatestUiConversation
+  readonly uiWorkspace: { pickDirectory(): Promise<string | null> }
+  readonly workspaces: WorkspacesLike
+}
+
+interface RedteamConnection {
+  readonly rpc: {
+    call(
+      channel: string,
+      endpoint: string,
+      payload: unknown,
+      signal?: AbortSignal,
+    ): Promise<
+      | { readonly ok: true; readonly value: unknown }
+      | { readonly error: { readonly message: string }; readonly ok: false }
+    >
+  }
+}
 
 type ProjectSessionResult = { error?: string; ok: boolean }
 
@@ -90,83 +174,44 @@ function executionPolicy(value: unknown): DashboardExecutionPolicy | undefined {
   }
 }
 
-function mcpPermission(value: unknown): McpPermission {
-  const p = record(value)
-  if (
-    p === undefined ||
-    typeof p.connectionId !== 'string' ||
-    typeof p.toolName !== 'string' ||
-    typeof p.schemaHash !== 'string' ||
-    !['blocked', 'passive', 'active-scan', 'exploitation', 'full'].includes(p.mode as string) ||
-    !['none', 'host', 'url'].includes(p.targetKind as string) ||
-    typeof p.targetField !== 'string' ||
-    typeof p.reason !== 'string' ||
-    typeof p.confirmed !== 'boolean'
-  )
-    throw new Error('服务端返回了无效的 AI 权限建议。')
-  return {
-    connectionId: p.connectionId,
-    toolName: p.toolName,
-    schemaHash: p.schemaHash,
-    mode: p.mode as McpPermission['mode'],
-    targetKind: p.targetKind as McpPermission['targetKind'],
-    targetField: p.targetField,
-    reason: p.reason,
-    confirmed: p.confirmed,
+function toolAvailability(value: unknown): readonly DashboardToolAvailability[] | undefined {
+  const response = record(value)
+  if (!Array.isArray(response?.tools)) return undefined
+  const tools: DashboardToolAvailability[] = []
+  for (const value of response.tools) {
+    const tool = record(value)
+    if (tool === undefined || typeof tool.id !== 'string' || typeof tool.installed !== 'boolean') {
+      return undefined
+    }
+    tools.push({ id: tool.id, installed: tool.installed })
   }
+  return tools
 }
 
-function mcpConnection(value: unknown): McpConnection {
-  const item = record(value)
-  if (
-    item === undefined ||
-    typeof item.id !== 'string' ||
-    typeof item.label !== 'string' ||
-    typeof item.endpoint !== 'string' ||
-    !['http', 'stdio'].includes(item.transport as string) ||
-    typeof item.connected !== 'boolean' ||
-    typeof item.executable !== 'boolean' ||
-    typeof item.reviewId !== 'string' ||
-    !Array.isArray(item.permissions) ||
-    !Array.isArray(item.tools) ||
-    item.tools.some((name) => typeof name !== 'string')
-  ) {
-    throw new Error('服务端返回了无效的 MCP 连接信息。')
-  }
-  return {
-    id: item.id,
-    label: item.label,
-    endpoint: item.endpoint,
-    transport: item.transport as 'http' | 'stdio',
-    connected: item.connected,
-    executable: item.executable,
-    reviewId: item.reviewId,
-    permissions: item.permissions.map(mcpPermission),
-    tools: item.tools as string[],
-  }
+async function openFreshRedteamSession(
+  ctx: RedteamClientContext,
+  path: string,
+): Promise<{ sessionId: SessionId; session: SessionFaceLike }> {
+  const workspace = await ctx.workspaces.create({ path })
+  const sessions = ctx.sessions
+  const sessionId = await sessions.create({ workspaceId: workspace.workspaceId })
+  const selected = await ctx.remote.agentPresets.select(sessionId, 'redteam')
+  if (!selected.ok) throw new Error(selected.error.message)
+  const session = sessions.binding(sessionId)?.session
+  if (session === undefined) throw new Error('新会话已创建，但暂时无法连接。')
+  sessions.open(sessionId)
+  return { session, sessionId }
 }
 
 async function promptFreshRedteamSession(
-  ctx: Context,
+  ctx: RedteamClientContext,
   path: string,
   prompt: string,
 ): Promise<ProjectSessionResult> {
   try {
-    const workspace = await ctx.workspaces.create({ path })
-    const sessionId = await ctx.sessions.create({
-      workspaceId: workspace.workspaceId,
-      agentPreset: 'redteam',
-    })
-    return await ctx.sessions.using(
-      sessionId,
-      { source: 'redteamDashboard' },
-      async (reference) => {
-        const { session } = await reference.ready
-        ctx.uiWorkspace.openSession(sessionId)
-        const result = await session.prompt([{ type: 'text', text: prompt }], 'queue')
-        return result.ok ? { ok: true } : { error: result.error.message, ok: false }
-      },
-    )
+    const { session } = await openFreshRedteamSession(ctx, path)
+    const result = await session.prompt([{ type: 'text', text: prompt }], 'queue')
+    return result.ok ? { ok: true } : { error: result.error.message, ok: false }
   } catch (error) {
     return { error: error instanceof Error ? error.message : String(error), ok: false }
   }
@@ -179,25 +224,34 @@ function object(value: unknown): Readonly<Record<string, unknown>> | undefined {
 }
 
 function normalizeConversation(
-  chat: ChatSnapshot | undefined,
-  lifecycle: SessionSnapshot,
+  value: unknown,
+  lifecycle?: unknown,
 ): DashboardConversationSnapshot | undefined {
-  if (chat === undefined) return undefined
+  const source = object(value)
+  const state = object(lifecycle)
+  const legacy = object(source?.legacy)
+  const nodes = Array.isArray(legacy?.nodes) ? legacy.nodes : undefined
+  if (nodes === undefined) return undefined
+  const runningCalls = Array.isArray(legacy?.runningCalls) ? legacy.runningCalls : []
+  const partial = legacy?.partial
   return {
-    hasMore: lifecycle.hasMore,
-    loadingOlder: lifecycle.loadingOlder,
-    nodes: chat.legacy.nodes,
-    partial: chat.legacy.partial,
-    running: lifecycle.running,
-    runningCalls: chat.legacy.runningCalls,
+    hasMore: state?.hasMore === true,
+    loadingOlder: state?.loadingOlder === true,
+    nodes: nodes as DashboardConversationSnapshot['nodes'],
+    partial:
+      partial === null || partial === undefined
+        ? null
+        : (partial as DashboardConversationSnapshot['partial']),
+    running: state?.running === true,
+    runningCalls: runningCalls as DashboardConversationSnapshot['runningCalls'],
   }
 }
 
 function conversationSource(
-  ctx: Context,
+  ctx: RedteamClientContext,
   sessionId: SessionId,
 ): DashboardConversationSource | undefined {
-  const binding = ctx.sessions.binding(sessionId as Parameters<Context['sessions']['binding']>[0])
+  const binding = ctx.sessions.binding(sessionId)
   if (binding === undefined) return undefined
   const session = binding.session
   const target = ctx.uiConversation.binding(binding).target('chat')
@@ -225,7 +279,7 @@ function conversationSource(
   }
 }
 
-function projectedModel(session: SessionFace | undefined): DashboardModelSelection | undefined {
+function projectedModel(session: SessionFaceLike | undefined): DashboardModelSelection | undefined {
   const projection = session?.projections?.faceOf('modelSelection').getSnapshot()
   const state = object(projection)
   const selected = object(state?.next) ?? object(state?.lastUsed)
@@ -234,8 +288,9 @@ function projectedModel(session: SessionFace | undefined): DashboardModelSelecti
     : undefined
 }
 
-export function apply(ctx: Context): void {
-  const connection = ctx.get('connection') as ConnectionHandle
+export function apply(baseContext: Context): void {
+  const ctx = baseContext as unknown as RedteamClientContext
+  const connection = ctx.connection
   ctx.effect(() => {
     const style = document.createElement('style')
     style.dataset.pluginCss = '@prism-ai/dsh-redteam/dashboard'
@@ -245,36 +300,13 @@ export function apply(ctx: Context): void {
   }, 'dsh-redteam: dashboard styles')
 
   const runtime: DashboardRuntime = {
-    confirmMcpPermissions: async (sessionId, connectionId, reviewId) => {
-      const result = await connection.rpc.call('/api', 'redteam-policy/confirm-permissions', {
-        sessionId,
-        connectionId,
-        reviewId,
-      })
-      if (!result.ok) throw new Error(result.error.message)
-      return mcpConnection(result.value)
-    },
-    mcpConnections: async (sessionId) => {
-      const result = await connection.rpc.call('/api', 'redteam-policy/connections', { sessionId })
-      if (!result.ok) throw new Error(result.error.message)
-      if (!Array.isArray(result.value) || result.value.length > 16)
-        throw new Error('服务端返回了无效的 MCP 连接列表。')
-      return result.value.map(mcpConnection)
-    },
-    connectMcp: async (sessionId, definition) => {
-      const result = await connection.rpc.call('/api', 'redteam-policy/connect', {
-        sessionId,
-        connection: definition,
-      })
-      if (!result.ok) throw new Error(result.error.message)
-      return mcpConnection(result.value)
-    },
+    closeNativeDetails: () => ctx.layout.closeDetails(),
     createProjectSession: async ({ name, path }) =>
       await promptFreshRedteamSession(ctx, path, projectStartPrompt(name)),
     loadProjectSession: async ({ path }) =>
       await promptFreshRedteamSession(ctx, path, projectLoadPrompt()),
     executionPolicy: async (sessionId) => {
-      const result = await connection.rpc.call('/api', 'redteam-policy/get', { sessionId })
+      const result = await connection.rpc.call('/redteam-policy', 'get', { sessionId })
       if (!result.ok) return { error: result.error.message, ok: false }
       const policy = executionPolicy(result.value)
       return policy === undefined
@@ -284,9 +316,7 @@ export function apply(ctx: Context): void {
     models: async (sessionId) => {
       const result = await ctx.remote.session.modelCatalog()
       if (!result.ok) return { error: result.error.message, models: [], ok: false }
-      const session = ctx.sessions.binding(
-        sessionId as Parameters<Context['sessions']['binding']>[0],
-      )?.session
+      const session = ctx.sessions.binding(sessionId)?.session
       const current = projectedModel(session) ?? result.value.default
       return {
         current,
@@ -304,33 +334,31 @@ export function apply(ctx: Context): void {
     },
     pickDirectory: async () => await ctx.uiWorkspace.pickDirectory(),
     prompt: async (sessionId, text) => {
-      const session = ctx.sessions.binding(
-        sessionId as Parameters<Context['sessions']['binding']>[0],
-      )?.session
+      const session = ctx.sessions.binding(sessionId)?.session
       if (session === undefined) return { error: '当前会话不可用。', ok: false }
       const result = await session.prompt([{ type: 'text', text }], 'queue')
       return result.ok ? { ok: true } : { error: result.error.message, ok: false }
     },
     selectModel: async (sessionId, selection) => {
-      const result = await ctx.remote.session.selectModel({
-        sessionId: sessionId as Parameters<Context['sessions']['binding']>[0],
-        ...selection,
-      })
+      const result = await ctx.remote.session.selectModel({ sessionId, ...selection })
       return result.ok ? { ok: true } : { error: result.error.message, ok: false }
     },
     conversation: (sessionId) => conversationSource(ctx, sessionId),
     loadOlder: async (sessionId) => {
-      const session = ctx.sessions.binding(
-        sessionId as Parameters<Context['sessions']['binding']>[0],
-      )?.session
+      const session = ctx.sessions.binding(sessionId)?.session
       if (session === undefined) throw new Error('当前会话不可用。')
       await session.loadOlder()
     },
+    toolAvailability: async () => {
+      const result = await connection.rpc.call('/redteam-tool-availability', 'list', {})
+      if (!result.ok) return { error: result.error.message, ok: false, tools: [] }
+      const tools = toolAvailability(result.value)
+      return tools === undefined
+        ? { error: '服务端返回了无效的工具状态。', ok: false, tools: [] }
+        : { ok: true, tools }
+    },
     updateExecutionPolicy: async (sessionId, policy) => {
-      const result = await connection.rpc.call('/api', 'redteam-policy/update', {
-        policy,
-        sessionId,
-      })
+      const result = await connection.rpc.call('/redteam-policy', 'update', { policy, sessionId })
       if (!result.ok) return { error: result.error.message, ok: false }
       const applied = executionPolicy(result.value)
       return applied === undefined
@@ -339,35 +367,20 @@ export function apply(ctx: Context): void {
     },
   }
 
-  const navigation: ShellNavigation = {
-    openSession: async (id) => {
-      await ctx.sessions.refresh()
-      const nativeId = id as Parameters<Context['sessions']['binding']>[0]
-      if (!ctx.sessions.list.getSnapshot().byId[nativeId])
-        throw new Error('会话列表正在同步，请重试。')
-      ctx.uiWorkspace.openSession(nativeId)
-    },
-    startSession: () => ctx.uiWorkspace.startSession(undefined, { agentPreset: 'redteam' }),
-    openDirectory: async (path) => {
-      const workspace = await ctx.workspaces.create({ path })
-      await ctx.uiWorkspace.openWorkspace(workspace.workspaceId, undefined, {
-        agentPreset: 'redteam',
-      })
-    },
-    cancel: async (id) => {
-      const session = ctx.sessions.binding(
-        id as Parameters<Context['sessions']['binding']>[0],
-      )?.session
-      if (!session) throw new Error('当前会话不可用。')
-      const result = await session.cancel()
-      if (!result.ok) throw new Error(result.error.message)
-    },
-  }
-  const PrismEntry = (props: PropsRuntime<'root'>) => (
-    <PrismShell {...props} runtime={runtime} navigation={navigation} />
+  const DashboardEntry = (props: PropsRuntime<'shell.overlay'>) => (
+    <Dashboard {...(props as DashboardProps)} runtime={runtime} />
   )
-  // This product intentionally replaces the stock shell; DSH still owns every session and tool.
-  ctx.slots.register({ name: 'root', priority: -100, registrant: 'prism' }, PrismEntry)
+  ctx.slots.inject('shell.overlay', () =>
+    ctx.slots.register(
+      {
+        name: 'shell.overlay',
+        id: 'dsh-redteam-dashboard',
+        order: 80,
+        label: '棱镜',
+      },
+      DashboardEntry,
+    ),
+  )
 }
 
 const plugin = { apply, inject }

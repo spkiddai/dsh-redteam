@@ -1,6 +1,4 @@
 import { join } from 'node:path'
-import { assessmentReadiness, recordCoverage, type CoverageInput } from './assessment-coverage.js'
-import type { FindingValidation } from './types.js'
 import { renderReport } from './report.js'
 import { scanWorkspace } from './scanner.js'
 import { AssessmentStore } from './store.js'
@@ -131,7 +129,7 @@ export class RedTeamRuntime {
       ruleCount: this.options.rules?.length ?? SCAN_RULES.length,
       rulesetVersion: RULESET_VERSION,
       storageRoot: this.options.storageRoot,
-      version: '1.4.0',
+      version: '1.3.2',
       workspaceRoot: this.options.workspaceRoot,
     }
   }
@@ -491,26 +489,13 @@ export class RedTeamRuntime {
     findingId: string,
     status: FindingStatus,
     reason: string,
-    validation?: FindingValidation,
   ): Promise<FindingUpdateResult> {
     return await this.serializeMutation(async () => {
       const current = await this.resolveAssessment(assessmentId)
-      const updated = changeFindingStatus(current, findingId, status, reason, undefined, validation)
+      const updated = changeFindingStatus(current, findingId, status, reason)
       await this.store.replace(updated.assessment)
       if (this.current?.id === updated.assessment.id) this.current = updated.assessment
       return { assessmentId: updated.assessment.id, finding: updated.finding }
-    })
-  }
-
-  async coverage(assessmentId: string | undefined, input?: CoverageInput) {
-    return await this.serializeMutation(async () => {
-      const current = await this.resolveAssessment(assessmentId)
-      const updated = input ? recordCoverage(current, input) : current
-      if (input) {
-        await this.store.replace(updated)
-        if (this.current?.id === updated.id) this.current = updated
-      }
-      return { ...assessmentReadiness(updated), entries: updated.coverage ?? [] }
     })
   }
 

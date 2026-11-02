@@ -1,4 +1,3 @@
-import type { McpPermission } from './mcp-permissions.js'
 import { isIP } from 'node:net'
 
 export const REDTEAM_OPERATION_MODES = ['passive', 'active-scan', 'exploitation', 'full'] as const
@@ -29,8 +28,7 @@ type TargetKind = 'host' | 'url'
 interface ManagedToolCall {
   readonly requiredMode: RedTeamOperationMode
   readonly targets: readonly { readonly kind: TargetKind; readonly value: string }[]
-  readonly toolId: string
-  readonly requiresTarget?: boolean
+  readonly toolId: 'burp-suite' | 'metasploit' | 'nmap' | 'nuclei'
 }
 
 const MODE_RANK: Readonly<Record<RedTeamOperationMode, number>> = {
@@ -163,7 +161,6 @@ function leafToolName(name: string): string {
 
 function managedCall(name: string, argumentsValue: unknown): ManagedToolCall | undefined {
   const args = record(argumentsValue)
-  if (!name.startsWith('mcp__redteam-tools__')) return undefined
   const leaf = leafToolName(name)
   switch (leaf) {
     case 'nmap_status':
@@ -214,12 +211,6 @@ function canonicalHost(value: string): string | undefined {
   if (candidate.startsWith('[') && candidate.endsWith(']')) candidate = candidate.slice(1, -1)
   if (candidate.endsWith('.')) candidate = candidate.slice(0, -1)
   if (candidate === '' || /[\s/@?#]/u.test(candidate)) return undefined
-  if (isIP(candidate) !== 0) return candidate
-  if (
-    candidate.length > 253 ||
-    !candidate.split('.').every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(label))
-  )
-    return undefined
   return candidate
 }
 
@@ -286,7 +277,7 @@ function hostAllowed(host: string, rule: TestingScopeRule): boolean {
     case 'domain':
       return host === authorized || (rule.mode === 'subdomains' && host.endsWith(`.${authorized}`))
     case 'ip':
-      return rule.mode === 'all-ports' && host === authorized
+      return host === authorized
     default:
       return false
   }
@@ -317,34 +308,17 @@ export function evaluateRedTeamToolPolicy(
   policy: RedTeamExecutionPolicy,
   toolName: string,
   argumentsValue: unknown,
-  permissions: readonly McpPermission[] = [],
 ): RedTeamPolicyDecision {
-  let call = managedCall(toolName, argumentsValue)
+  const call = managedCall(toolName, argumentsValue)
   if (call === undefined) {
-    const permission = permissions.find((p) => p.toolName === toolName && p.confirmed)
-    if (permission !== undefined && permission.mode !== 'blocked') {
-      const raw = record(argumentsValue)?.[permission.targetField]
-      const values = typeof raw === 'string' ? [raw] : (stringArray(raw) ?? [])
-      call = {
-        toolId: permission.connectionId,
-        requiredMode: permission.mode,
-        requiresTarget: permission.targetKind !== 'none',
-        targets:
-          permission.targetKind === 'none'
-            ? []
-            : values.map((value) => ({ kind: permission.targetKind as TargetKind, value })),
-      }
-    }
-  }
-  if (call === undefined) {
-    return toolName.startsWith('mcp__')
-      ? { kind: 'deny', reason: `棱镜拒绝未定义权限规则的 MCP 工具：${toolName}` }
+    return toolName.startsWith('mcp__redteam-tools__')
+      ? { kind: 'deny', reason: `棱镜拒绝未定义权限规则的本地安全工具：${toolName}` }
       : { kind: 'proceed' }
   }
   if (!policy.enabledToolIds.includes(call.toolId)) {
     return { kind: 'deny', reason: `工具“${call.toolId}”尚未在工具集成中勾选并确认。` }
   }
-  const requiresTarget = call.requiresTarget ?? call.requiredMode !== 'passive'
+  const requiresTarget = call.requiredMode !== 'passive'
   if (requiresTarget && call.targets.length === 0) {
     return { kind: 'deny', reason: `工具“${toolName}”缺少可校验的目标，已拒绝执行。` }
   }

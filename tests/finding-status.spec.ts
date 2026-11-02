@@ -42,11 +42,6 @@ describe('finding review workflow', () => {
       'confirmed',
       'Reviewed token=top-secret-value against reachable input.',
       '2026-08-22T01:00:00.000Z',
-      {
-        method: 'code-review',
-        procedure: 'Trace input into eval.',
-        observation: 'Untrusted input reaches the sink.',
-      },
     )
     expect(source.findings[0]?.status).toBe('candidate')
     expect(confirmed.finding).toMatchObject({
@@ -66,12 +61,6 @@ describe('finding review workflow', () => {
       'finding-one',
       'fixed',
       'Regression test passes.',
-      undefined,
-      {
-        method: 'regression-test',
-        procedure: 'Run the input regression test.',
-        observation: 'Input is rejected.',
-      },
     )
     expect(fixed.finding.statusHistory).toHaveLength(2)
     expect(fixed.finding.statusHistory?.[1]?.changedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/u)

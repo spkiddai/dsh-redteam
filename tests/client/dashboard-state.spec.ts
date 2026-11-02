@@ -1,4 +1,3 @@
-import { currentSession } from '../../src/client/runtime-contract.js'
 import type {
   DashboardConversationSnapshot as ConversationSnapshot,
   RunningToolCall,
@@ -31,36 +30,6 @@ function snapshot(
 }
 
 describe('Red Team dashboard state', () => {
-  it('applies the latest successful finding update only to its assessment and after its list', () => {
-    const finding = {
-      id: 'f1',
-      title: 'SQL',
-      location: { path: 'a.ts', line: 1 },
-      severity: 'high',
-      status: 'candidate',
-    }
-    const list = result(
-      'redteam_findings',
-      { assessmentId: 'a1', findings: [finding], total: 1 },
-      2,
-    )
-    const updated = (assessmentId: string, status: string, seq: number) =>
-      result('redteam_update_finding', { assessmentId, finding: { ...finding, status } }, seq)
-    expect(
-      deriveDashboardState(
-        snapshot([list, updated('a1', 'confirmed', 3), updated('a1', 'fixed', 4)]),
-      ).findings[0]?.status,
-    ).toBe('fixed')
-    expect(
-      deriveDashboardState(snapshot([list, updated('a2', 'fixed', 3)])).findings[0]?.status,
-    ).toBe('candidate')
-    expect(
-      deriveDashboardState(snapshot([updated('a1', 'fixed', 1), list])).findings[0]?.status,
-    ).toBe('candidate')
-    const failed = { ...updated('a1', 'fixed', 3), isError: true }
-    expect(deriveDashboardState(snapshot([list, failed])).findings[0]?.status).toBe('candidate')
-  })
-
   it('folds the latest scan, redacted findings, and report into bounded UI state', () => {
     const state = deriveDashboardState(
       snapshot([
@@ -349,18 +318,5 @@ describe('Red Team dashboard state', () => {
       runningTool: undefined,
       scan: undefined,
     })
-  })
-})
-
-describe('DSH main-view selection', () => {
-  it('selects the retained main view instead of the first catalog or background session', () => {
-    const background = {
-      id: 'background',
-      retainedBy: {},
-      projectionValues: { agentPreset: 'redteam' },
-    }
-    const selected = { id: 'selected', retainedBy: { mainView: 1 } }
-    expect(currentSession({ byId: { background, selected } })).toBe(selected)
-    expect(currentSession({ byId: { background } })).toBeUndefined()
   })
 })
