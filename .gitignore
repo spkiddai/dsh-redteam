@@ -1,0 +1,14 @@
+node_modules/
+dist/
+coverage/
+*.tgz
+.DS_Store
+.env
+.env.*
+!deploy/**/.env.example
+.dsh-redteam/
+.prism/
+.dsh/
+prism-auth/
+
+.prism-app/
